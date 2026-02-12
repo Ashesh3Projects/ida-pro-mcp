@@ -14,7 +14,7 @@ import ida_xref
 import ida_ua
 import ida_name
 from .rpc import tool
-from .sync import idasync, tool_timeout
+from .sync import idasync
 from .utils import (
     parse_address,
     normalize_list_input,
@@ -179,7 +179,6 @@ def _resolve_immediate_insn_start(
 
 @tool
 @idasync
-@tool_timeout(90.0)
 def decompile(
     addr: Annotated[str, "Function address to decompile"],
 ) -> dict:
@@ -196,7 +195,6 @@ def decompile(
 
 @tool
 @idasync
-@tool_timeout(90.0)
 def disasm(
     addr: Annotated[str, "Function address to disassemble"],
     max_instructions: Annotated[
