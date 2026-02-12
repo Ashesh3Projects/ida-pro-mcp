@@ -22,26 +22,56 @@ else:
 
     sys.path.pop(0)  # Clean up
 
+from ida_pro_mcp.instance_registry import (
+    list_instances as registry_list_instances,
+    find_instance_by_binary,
+    find_instance_by_id,
+    cleanup_stale_instances,
+    InstanceInfo,
+)
+
 IDA_HOST = "127.0.0.1"
 IDA_PORT = 13337
+
+# Currently selected target instance (for multi-instance routing)
+_target_instance_id: str | None = None
 
 mcp = McpServer("ida-pro-mcp")
 dispatch_original = mcp.registry.dispatch
 
 
-def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse | None:
-    """Dispatch JSON-RPC requests to the MCP server registry"""
-    if not isinstance(request, dict):
-        request_obj: JsonRpcRequest = json.loads(request)
-    else:
-        request_obj: JsonRpcRequest = request  # type: ignore
+def _get_target_instance() -> tuple[str, int] | None:
+    """Resolve the target IDA instance to route requests to.
 
-    if request_obj["method"] == "initialize":
-        return dispatch_original(request)
-    elif request_obj["method"].startswith("notifications/"):
-        return dispatch_original(request)
+    Priority:
+    1. Explicitly selected instance (via select_instance tool)
+    2. Single registered instance (auto-select if only one)
+    3. None (use default IDA_HOST:IDA_PORT)
+    """
+    global _target_instance_id
 
-    conn = http.client.HTTPConnection(IDA_HOST, IDA_PORT, timeout=30)
+    # If a specific instance is selected, use it
+    if _target_instance_id:
+        info = find_instance_by_id(_target_instance_id)
+        if info and info.is_alive():
+            return (info.host, info.port)
+        # Selected instance is gone, clear selection
+        _target_instance_id = None
+
+    # Check registered instances
+    instances = registry_list_instances()
+    if len(instances) == 1:
+        return (instances[0].host, instances[0].port)
+
+    # No instances or multiple without selection: use default
+    return None
+
+
+def _forward_to_ida(
+    host: str, port: int, request: dict | str | bytes | bytearray
+) -> JsonRpcResponse:
+    """Forward a JSON-RPC request to an IDA instance."""
+    conn = http.client.HTTPConnection(host, port, timeout=30)
     try:
         if isinstance(request, dict):
             request = json.dumps(request)
@@ -51,6 +81,65 @@ def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse |
         response = conn.getresponse()
         data = response.read().decode()
         return json.loads(data)
+    finally:
+        conn.close()
+
+
+def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse | None:
+    """Dispatch JSON-RPC requests, routing to the correct IDA instance.
+
+    Handles multi-instance routing and local instance management tools.
+    """
+    if not isinstance(request, dict):
+        request_obj: JsonRpcRequest = json.loads(request)
+    else:
+        request_obj: JsonRpcRequest = request  # type: ignore
+
+    method = request_obj["method"]
+
+    # Handle locally: initialize, notifications, and instance management tools
+    if method == "initialize":
+        return dispatch_original(request)
+    elif method.startswith("notifications/"):
+        return dispatch_original(request)
+
+    # Handle instance management tools locally
+    if method == "tools/call":
+        params = request_obj.get("params", {})
+        if isinstance(params, dict):
+            tool_name = params.get("name", "")
+            if tool_name in ("list_instances", "select_instance", "instance_status"):
+                return dispatch_original(request)
+
+    # Handle tools/list: merge local tools with IDA instance tools
+    if method == "tools/list":
+        local_response = dispatch_original(request)
+        target = _get_target_instance()
+        host = target[0] if target else IDA_HOST
+        port = target[1] if target else IDA_PORT
+        try:
+            remote_response = _forward_to_ida(host, port, request)
+            # Merge: remote tools + local-only tools
+            if remote_response and "result" in remote_response:
+                remote_tools = remote_response["result"].get("tools", [])
+                local_tools = local_response["result"].get("tools", []) if local_response and "result" in local_response else []
+                remote_names = {t["name"] for t in remote_tools}
+                for lt in local_tools:
+                    if lt["name"] not in remote_names:
+                        remote_tools.append(lt)
+                remote_response["result"]["tools"] = remote_tools
+            return remote_response
+        except Exception:
+            # If IDA is not available, return only local tools
+            return local_response
+
+    # Resolve target IDA instance
+    target = _get_target_instance()
+    host = target[0] if target else IDA_HOST
+    port = target[1] if target else IDA_PORT
+
+    try:
+        return _forward_to_ida(host, port, request)
     except Exception as e:
         full_info = traceback.format_exc()
         id = request_obj.get("id")
@@ -61,22 +150,124 @@ def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse |
             shortcut = "Ctrl+Option+M"
         else:
             shortcut = "Ctrl+Alt+M"
+
+        # Build helpful error message with instance info
+        instances = registry_list_instances()
+        if instances:
+            instance_list = "\n".join(
+                f"  - {inst.binary_name} ({inst.host}:{inst.port}, id={inst.instance_id})"
+                for inst in instances
+            )
+            instance_hint = f"\n\nRegistered instances:\n{instance_list}\n\nUse 'select_instance' tool to choose a target instance."
+        else:
+            instance_hint = ""
+
         return JsonRpcResponse(
             {
                 "jsonrpc": "2.0",
                 "error": {
                     "code": -32000,
-                    "message": f"Failed to connect to IDA Pro! Did you run Edit -> Plugins -> MCP ({shortcut}) to start the server?\n{full_info}",
+                    "message": f"Failed to connect to IDA Pro at {host}:{port}! Did you run Edit -> Plugins -> MCP ({shortcut}) to start the server?\n{full_info}{instance_hint}",
                     "data": str(e),
                 },
                 "id": id,
             }
         )
-    finally:
-        conn.close()
 
 
 mcp.registry.dispatch = dispatch_proxy
+
+
+# ============================================================================
+# Instance Management Tools (handled locally by the MCP server)
+# ============================================================================
+
+
+@mcp.tool
+def list_instances() -> dict:
+    """List all active IDA Pro instances with their binary names and connection details.
+
+    Returns a list of all registered IDA instances that are currently running.
+    Each instance includes its binary name, port, instance ID, and status.
+    Use 'select_instance' to choose which instance to send commands to.
+    """
+    cleanup_stale_instances()
+    instances = registry_list_instances()
+    return {
+        "instances": [inst.to_dict() for inst in instances],
+        "count": len(instances),
+        "selected_instance": _target_instance_id,
+    }
+
+
+@mcp.tool
+def select_instance(
+    target: str,
+) -> dict:
+    """Select which IDA Pro instance to send commands to.
+
+    Select a specific IDA instance by instance ID or binary name.
+    All subsequent tool calls will be routed to the selected instance.
+    Use 'list_instances' to see available instances.
+
+    Args:
+        target: Instance ID or binary name to select
+    """
+    global _target_instance_id
+
+    # Try by instance ID first
+    info = find_instance_by_id(target)
+    if info and info.is_alive():
+        _target_instance_id = info.instance_id
+        return {
+            "selected": info.to_dict(),
+            "message": f"Selected instance '{info.instance_id}' analyzing '{info.binary_name}'",
+        }
+
+    # Try by binary name
+    info = find_instance_by_binary(target)
+    if info and info.is_alive():
+        _target_instance_id = info.instance_id
+        return {
+            "selected": info.to_dict(),
+            "message": f"Selected instance '{info.instance_id}' analyzing '{info.binary_name}'",
+        }
+
+    # Not found
+    instances = registry_list_instances()
+    available = [f"{inst.instance_id} ({inst.binary_name})" for inst in instances]
+    return {
+        "error": f"Instance not found: '{target}'",
+        "available_instances": available,
+    }
+
+
+@mcp.tool
+def instance_status() -> dict:
+    """Get the current connection status and selected IDA Pro instance.
+
+    Shows which IDA instance is currently selected for receiving commands,
+    and lists all available instances.
+    """
+    cleanup_stale_instances()
+    instances = registry_list_instances()
+
+    target = _get_target_instance()
+    status = {
+        "connected": target is not None,
+        "target_host": target[0] if target else IDA_HOST,
+        "target_port": target[1] if target else IDA_PORT,
+        "selected_instance_id": _target_instance_id,
+        "available_instances": [inst.to_dict() for inst in instances],
+        "instance_count": len(instances),
+    }
+
+    if _target_instance_id:
+        info = find_instance_by_id(_target_instance_id)
+        if info:
+            status["selected_binary"] = info.binary_name
+
+    return status
 
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
