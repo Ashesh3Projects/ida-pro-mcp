@@ -120,14 +120,16 @@ def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse |
         try:
             remote_response = _forward_to_ida(host, port, request)
             # Merge: remote tools + local-only tools
-            if remote_response and "result" in remote_response:
-                remote_tools = remote_response["result"].get("tools", [])
-                local_tools = local_response["result"].get("tools", []) if local_response and "result" in local_response else []
+            remote_result = remote_response.get("result") if remote_response else None
+            local_result = local_response.get("result") if local_response else None
+            if remote_result is not None and local_result is not None:
+                remote_tools = remote_result.get("tools", [])
+                local_tools = local_result.get("tools", [])
                 remote_names = {t["name"] for t in remote_tools}
                 for lt in local_tools:
                     if lt["name"] not in remote_names:
                         remote_tools.append(lt)
-                remote_response["result"]["tools"] = remote_tools
+                remote_result["tools"] = remote_tools
             return remote_response
         except Exception:
             # If IDA is not available, return only local tools
