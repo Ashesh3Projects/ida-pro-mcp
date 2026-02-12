@@ -71,7 +71,7 @@ def _forward_to_ida(
     host: str, port: int, request: dict | str | bytes | bytearray
 ) -> JsonRpcResponse:
     """Forward a JSON-RPC request to an IDA instance."""
-    conn = http.client.HTTPConnection(host, port, timeout=30)
+    conn = http.client.HTTPConnection(host, port, timeout=120)
     try:
         if isinstance(request, dict):
             request = json.dumps(request)
