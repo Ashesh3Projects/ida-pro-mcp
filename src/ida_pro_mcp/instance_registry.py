@@ -86,8 +86,26 @@ class InstanceInfo:
     def is_alive(self) -> bool:
         """Check if the process is still running."""
         try:
-            os.kill(self.pid, 0)
-            return True
+            if os.name == "nt":
+                # On Windows, os.kill(pid, 0) doesn't work reliably.
+                # Use ctypes to call OpenProcess and check if the PID is valid.
+                import ctypes.wintypes
+                kernel32 = ctypes.windll.kernel32
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                STILL_ACTIVE = 259
+                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, self.pid)
+                if not handle:
+                    return False
+                try:
+                    exit_code = ctypes.wintypes.DWORD()
+                    if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return exit_code.value == STILL_ACTIVE
+                    return False
+                finally:
+                    kernel32.CloseHandle(handle)
+            else:
+                os.kill(self.pid, 0)
+                return True
         except (OSError, ProcessLookupError):
             return False
 
