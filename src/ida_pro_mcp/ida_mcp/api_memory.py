@@ -6,7 +6,7 @@ granularities (bytes, integers, strings) and patching binary data.
 
 import re
 
-from typing import Annotated
+from typing import Annotated, NotRequired, TypedDict
 import ida_bytes
 import idaapi
 
@@ -19,7 +19,47 @@ from .utils import (
     MemoryRead,
     normalize_list_input,
     parse_address,
+    read_bytes_bss_safe,
+    read_int_bss_safe,
 )
+
+
+class BytesReadResult(TypedDict):
+    addr: str | None
+    data: str | None
+    error: NotRequired[str]
+
+
+class IntReadResult(TypedDict):
+    addr: str
+    ty: str
+    value: int | None
+    error: NotRequired[str]
+
+
+class StringReadResult(TypedDict):
+    addr: str
+    value: str | None
+    error: NotRequired[str]
+
+
+class GlobalValueResult(TypedDict):
+    query: str
+    value: str | None
+    error: NotRequired[str]
+
+
+class PatchResult(TypedDict):
+    addr: str | None
+    size: int
+    error: NotRequired[str]
+
+
+class IntWriteResult(TypedDict):
+    addr: str
+    ty: str
+    value: str | None
+    error: NotRequired[str]
 
 
 # ============================================================================
@@ -29,7 +69,7 @@ from .utils import (
 
 @tool
 @idasync
-def get_bytes(regions: list[MemoryRead] | MemoryRead) -> list[dict]:
+def get_bytes(regions: list[MemoryRead] | MemoryRead) -> list[BytesReadResult]:
     """Read bytes from memory addresses"""
     if isinstance(regions, dict):
         regions = [regions]
@@ -41,7 +81,8 @@ def get_bytes(regions: list[MemoryRead] | MemoryRead) -> list[dict]:
 
         try:
             ea = parse_address(addr)
-            data = " ".join(f"{x:#02x}" for x in ida_bytes.get_bytes(ea, size))
+            raw = read_bytes_bss_safe(ea, size)
+            data = " ".join(f"{x:#02x}" for x in raw)
             results.append({"addr": addr, "data": data})
         except Exception as e:
             results.append({"addr": addr, "data": None, "error": str(e)})
@@ -92,7 +133,7 @@ def get_int(
         list[IntRead] | IntRead,
         "Integer read requests (ty, addr). ty: i8/u64/i16le/i16be/etc",
     ],
-) -> list[dict]:
+) -> list[IntReadResult]:
     """Read integer values from memory addresses"""
     if isinstance(queries, dict):
         queries = [queries]
@@ -106,13 +147,13 @@ def get_int(
             bits, signed, byte_order, normalized = _parse_int_class(ty)
             ea = parse_address(addr)
             size = bits // 8
-            data = ida_bytes.get_bytes(ea, size)
-            if not data or len(data) != size:
+            data = read_bytes_bss_safe(ea, size)
+            if len(data) != size:
                 raise ValueError(f"Failed to read {size} bytes at {addr}")
 
             value = int.from_bytes(data, byte_order, signed=signed)
             results.append(
-                {"addr": addr, "ty": normalized, "value": value, "error": None}
+                {"addr": addr, "ty": normalized, "value": value}
             )
         except Exception as e:
             results.append({"addr": addr, "ty": ty, "value": None, "error": str(e)})
@@ -124,7 +165,7 @@ def get_int(
 @idasync
 def get_string(
     addrs: Annotated[list[str] | str, "Addresses to read strings from"],
-) -> list[dict]:
+) -> list[StringReadResult]:
     """Read strings from memory addresses"""
     addrs = normalize_list_input(addrs)
     results = []
@@ -169,16 +210,10 @@ def get_global_variable_value_internal(ea: int) -> str:
             return '""'
         return_string = raw.decode("utf-8", errors="replace").strip()
         return f'"{return_string}"'
-    elif size == 1:
-        return hex(ida_bytes.get_byte(ea))
-    elif size == 2:
-        return hex(ida_bytes.get_word(ea))
-    elif size == 4:
-        return hex(ida_bytes.get_dword(ea))
-    elif size == 8:
-        return hex(ida_bytes.get_qword(ea))
-    else:
-        return " ".join(hex(x) for x in ida_bytes.get_bytes(ea, size))
+
+    if size in (1, 2, 4, 8):
+        return hex(read_int_bss_safe(ea, size))
+    return " ".join(hex(b) for b in read_bytes_bss_safe(ea, size))
 
 
 @tool
@@ -187,9 +222,8 @@ def get_global_value(
     queries: Annotated[
         list[str] | str, "Global variable addresses or names to read values from"
     ],
-) -> list[dict]:
-    """Read global variable values by address or name
-    (auto-detects hex addresses vs names)"""
+) -> list[GlobalValueResult]:
+    """Read global variable values by address or symbol name."""
     from .utils import looks_like_address
 
     queries = normalize_list_input(queries)
@@ -215,7 +249,7 @@ def get_global_value(
                 continue
 
             value = get_global_variable_value_internal(ea)
-            results.append({"query": query, "value": value, "error": None})
+            results.append({"query": query, "value": value})
         except Exception as e:
             results.append({"query": query, "value": None, "error": str(e)})
 
@@ -229,7 +263,7 @@ def get_global_value(
 
 @tool
 @idasync
-def patch(patches: list[MemoryPatch] | MemoryPatch) -> list[dict]:
+def patch(patches: list[MemoryPatch] | MemoryPatch) -> list[PatchResult]:
     """Patch bytes at memory addresses with hex data"""
     if isinstance(patches, dict):
         patches = [patches]
@@ -241,9 +275,12 @@ def patch(patches: list[MemoryPatch] | MemoryPatch) -> list[dict]:
             ea = parse_address(patch["addr"])
             data = bytes.fromhex(patch["data"])
 
+            if not ida_bytes.is_mapped(ea):
+                raise ValueError(f"Address not mapped: {patch['addr']}")
+
             ida_bytes.patch_bytes(ea, data)
             results.append(
-                {"addr": patch["addr"], "size": len(data), "ok": True, "error": None}
+                {"addr": patch["addr"], "size": len(data)}
             )
 
         except Exception as e:
@@ -259,7 +296,7 @@ def put_int(
         list[IntWrite] | IntWrite,
         "Integer write requests (ty, addr, value). value is a string; supports 0x.. and negatives",
     ],
-) -> list[dict]:
+) -> list[IntWriteResult]:
     """Write integer values to memory addresses"""
     if isinstance(items, dict):
         items = [items]
@@ -280,14 +317,14 @@ def put_int(
                 raise ValueError(f"Value {value_text} does not fit in {normalized}")
 
             ea = parse_address(addr)
+            if not ida_bytes.is_mapped(ea):
+                raise ValueError(f"Address not mapped: {addr}")
             ida_bytes.patch_bytes(ea, data)
             results.append(
                 {
                     "addr": addr,
                     "ty": normalized,
                     "value": str(value_text),
-                    "ok": True,
-                    "error": None,
                 }
             )
         except Exception as e:
@@ -296,7 +333,6 @@ def put_int(
                     "addr": addr,
                     "ty": ty,
                     "value": str(value_text) if value_text is not None else None,
-                    "ok": False,
                     "error": str(e),
                 }
             )

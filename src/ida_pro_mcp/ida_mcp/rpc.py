@@ -1,7 +1,13 @@
 import json
 import os
 from typing import Any, Optional
-from .zeromcp import McpRpcRegistry, McpServer, McpToolError, McpHttpRequestHandler
+from .zeromcp import (
+    McpRpcRegistry,
+    McpServer,
+    McpToolError,
+    McpHttpRequestHandler,
+    get_current_request_external_base_url,
+)
 
 MCP_UNSAFE: set[str] = set()
 MCP_EXTENSIONS: dict[str, set[str]] = {}  # group -> set of function names
@@ -23,7 +29,11 @@ def set_download_base_url(url: str) -> None:
 
 
 def get_download_base_url() -> str:
-    return _download_base_url
+    return get_current_request_external_base_url() or _download_base_url
+
+
+def get_current_transport_session_id() -> str | None:
+    return MCP_SERVER.get_current_transport_session_id()
 
 
 def _generate_output_id() -> str:
@@ -44,17 +54,14 @@ def _truncate_value(value: Any, depth: int = 0) -> Any:
         return value[:OUTPUT_LIMIT_PREVIEW_STR_LEN] + f"... [{len(value)} chars total]"
 
     if isinstance(value, list):
-        truncated_list = [
+        # IMPORTANT: Do not inject sentinel objects like {"_truncated": "..."} into lists.
+        # Many tool schemas constrain list item shapes (additionalProperties: false),
+        # so sentinels can break structured output validation. Truncation is reported
+        # via _meta.ida_mcp and the download_hint content.
+        return [
             _truncate_value(item, depth + 1)
             for item in value[:OUTPUT_LIMIT_PREVIEW_ITEMS]
         ]
-        if len(value) > OUTPUT_LIMIT_PREVIEW_ITEMS:
-            truncated_list.append(
-                {
-                    "_truncated": f"... and {len(value) - OUTPUT_LIMIT_PREVIEW_ITEMS} more items"
-                }
-            )
-        return truncated_list
 
     if isinstance(value, dict):
         return {k: _truncate_value(v, depth + 1) for k, v in value.items()}
@@ -62,28 +69,15 @@ def _truncate_value(value: Any, depth: int = 0) -> Any:
     return value
 
 
-def _add_download_info(result: Any, output_id: str, total_chars: int) -> Any:
-    download_url = f"{_download_base_url}/output/{output_id}.json"
-    info = {
-        "_output_truncated": True,
-        "_total_chars": total_chars,
-        "_output_id": output_id,
-        "_download_url": download_url,
-        "_download_hint": f"Output truncated. Run: curl -o .ida-mcp/{output_id}.json {download_url}",
+def _build_download_meta(output_id: str, total_chars: int) -> dict:
+    download_url = f"{get_download_base_url()}/output/{output_id}.json"
+    return {
+        "output_truncated": True,
+        "total_chars": total_chars,
+        "output_id": output_id,
+        "download_url": download_url,
+        "download_hint": f"Output truncated. Run: curl -o .ida-mcp/{output_id}.json {download_url}",
     }
-
-    if isinstance(result, dict):
-        return {**result, **info}
-
-    if isinstance(result, list) and result:
-        result = list(result)
-        if isinstance(result[0], dict):
-            result[0] = {**result[0], **info}
-        else:
-            result.insert(0, info)
-        return result
-
-    return {"_preview": result, **info}
 
 
 def get_cached_output(output_id: str) -> Optional[Any]:
@@ -120,12 +114,21 @@ def _install_tools_call_patch() -> None:
         _cache_output(output_id, structured)
 
         preview = _truncate_value(structured)
-        preview = _add_download_info(preview, output_id, len(serialized))
+        download_meta = _build_download_meta(output_id, len(serialized))
+
+        content = [{
+            "type": "text",
+            "text": json.dumps(preview, separators=(",", ":")),
+        }, {
+            "type": "text",
+            "text": download_meta["download_hint"],
+        }]
 
         return {
             "structuredContent": preview,
-            "content": response.get("content", []),
+            "content": content,
             "isError": False,
+            "_meta": {"ida_mcp": download_meta},
         }
 
     MCP_SERVER.registry.methods["tools/call"] = patched
@@ -184,4 +187,5 @@ __all__ = [
     "get_cached_output",
     "set_download_base_url",
     "get_download_base_url",
+    "get_current_transport_session_id",
 ]

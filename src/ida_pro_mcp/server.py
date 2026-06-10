@@ -1,178 +1,241 @@
-import os
-import sys
-import json
-import shutil
 import argparse
 import http.client
-import tempfile
+import json
+import os
+import re
+import sys
 import traceback
-import tomllib
-import tomli_w
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
-import glob
+from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
-    from ida_pro_mcp.ida_mcp.zeromcp import McpServer
-    from ida_pro_mcp.ida_mcp.zeromcp.jsonrpc import JsonRpcResponse, JsonRpcRequest
+    from ida_pro_mcp.ida_mcp.zeromcp import (
+        EXTERNAL_BASE_HEADER,
+        McpHttpRequestHandler,
+        McpServer,
+        get_current_request_external_base_url,
+    )
+    from ida_pro_mcp.ida_mcp.zeromcp.jsonrpc import JsonRpcRequest, JsonRpcResponse
 else:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ida_mcp"))
-    from zeromcp import McpServer
-    from zeromcp.jsonrpc import JsonRpcResponse, JsonRpcRequest
+    from zeromcp import (
+        EXTERNAL_BASE_HEADER,
+        McpHttpRequestHandler,
+        McpServer,
+        get_current_request_external_base_url,
+    )
+    from zeromcp.jsonrpc import JsonRpcRequest, JsonRpcResponse
 
-    sys.path.pop(0)  # Clean up
+    sys.path.pop(0)
 
-from ida_pro_mcp.instance_registry import (
-    list_instances as registry_list_instances,
-    find_instance_by_binary,
-    find_instance_by_id,
-    cleanup_stale_instances,
-    InstanceInfo,
-)
+try:
+    from .installer import (
+        list_available_clients,
+        print_mcp_config,
+        run_install_command,
+        set_ida_rpc,
+    )
+except ImportError:
+    from installer import (
+        list_available_clients,
+        print_mcp_config,
+        run_install_command,
+        set_ida_rpc,
+    )
 
-IDA_HOST = "127.0.0.1"
-IDA_PORT = 13337
+try:
+    from .instance_registry import (
+        cleanup_stale_instances,
+        find_instance_by_binary,
+        find_instance_by_id,
+        list_instances as registry_list_instances,
+    )
+except ImportError:
+    from instance_registry import (
+        cleanup_stale_instances,
+        find_instance_by_binary,
+        find_instance_by_id,
+        list_instances as registry_list_instances,
+    )
 
-# Currently selected target instance (for multi-instance routing)
+DEFAULT_IDA_HOST = "127.0.0.1"
+DEFAULT_IDA_PORT = 13337
+IDA_HOST = DEFAULT_IDA_HOST
+IDA_PORT = DEFAULT_IDA_PORT
+
+# Currently selected target instance for custom multi-instance routing.
 _target_instance_id: str | None = None
 
 mcp = McpServer("ida-pro-mcp")
 dispatch_original = mcp.registry.dispatch
 
+_OUTPUT_PATH_RE = re.compile(r"^/output/([a-f0-9-]+)\.(\w+)$")
+
+
+def _get_proxy_request_path() -> str:
+    """Build the proxied MCP path, preserving enabled extensions."""
+    enabled = sorted(getattr(mcp._enabled_extensions, "data", set()))
+    if enabled:
+        return f"/mcp?ext={','.join(enabled)}"
+    return "/mcp"
+
+
+def _get_proxy_request_headers() -> dict[str, str]:
+    """Build proxy request headers, preserving HTTP MCP session identity."""
+    headers = {"Content-Type": "application/json"}
+    transport_session_id = mcp.get_current_transport_session_id()
+    if transport_session_id and transport_session_id.startswith("http:"):
+        session_id = transport_session_id.split(":", 1)[1]
+        if session_id and session_id != "anonymous":
+            headers["Mcp-Session-Id"] = session_id
+    external_base_url = get_current_request_external_base_url()
+    if external_base_url:
+        headers[EXTERNAL_BASE_HEADER] = external_base_url
+    return headers
+
 
 def _get_target_instance() -> tuple[str, int] | None:
-    """Resolve the target IDA instance to route requests to.
-
-    Priority:
-    1. Explicitly selected instance (via select_instance tool)
-    2. Single registered instance (auto-select if only one)
-    3. None (use default IDA_HOST:IDA_PORT)
-    """
+    """Resolve the target IDA instance using the custom registry."""
     global _target_instance_id
 
-    # If a specific instance is selected, use it
     if _target_instance_id:
         info = find_instance_by_id(_target_instance_id)
         if info and info.is_alive():
             return (info.host, info.port)
-        # Selected instance is gone, clear selection
         _target_instance_id = None
 
-    # Check registered instances
     instances = registry_list_instances()
     if len(instances) == 1:
         return (instances[0].host, instances[0].port)
 
-    # No instances or multiple without selection: use default
     return None
 
 
-def _forward_to_ida(
-    host: str, port: int, request: dict | str | bytes | bytearray
-) -> JsonRpcResponse:
-    """Forward a JSON-RPC request to an IDA instance."""
+def _proxy_to_ida(
+    payload: bytes | str | dict, host: str | None = None, port: int | None = None
+) -> dict:
+    """Send a JSON-RPC request to the configured IDA instance and return the response."""
+    if isinstance(payload, dict):
+        payload = json.dumps(payload)
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
+
+    target_host = host if host is not None else IDA_HOST
+    target_port = port if port is not None else IDA_PORT
+    conn = http.client.HTTPConnection(target_host, target_port, timeout=120)
+    try:
+        conn.request(
+            "POST",
+            _get_proxy_request_path(),
+            payload,
+            _get_proxy_request_headers(),
+        )
+        response = conn.getresponse()
+        raw_data = response.read().decode()
+        if response.status >= 400:
+            raise RuntimeError(
+                f"HTTP {response.status} {response.reason}: {raw_data}"
+            )
+        return json.loads(raw_data)
+    finally:
+        conn.close()
+
+
+def _proxy_output_download(path: str) -> tuple[int, str, list[tuple[str, str]], bytes]:
+    """Proxy a raw output download from the configured IDA instance."""
+    target = _get_target_instance()
+    host = target[0] if target else IDA_HOST
+    port = target[1] if target else IDA_PORT
     conn = http.client.HTTPConnection(host, port, timeout=120)
     try:
-        if isinstance(request, dict):
-            request = json.dumps(request)
-        elif isinstance(request, str):
-            request = request.encode("utf-8")
-        conn.request("POST", "/mcp", request, {"Content-Type": "application/json"})
+        conn.request("GET", path)
         response = conn.getresponse()
-        data = response.read().decode()
-        return json.loads(data)
+        return response.status, response.reason, response.getheaders(), response.read()
     finally:
         conn.close()
 
 
 def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse | None:
-    """Dispatch JSON-RPC requests, routing to the correct IDA instance.
-
-    Handles multi-instance routing and local instance management tools.
-    """
+    """Dispatch JSON-RPC requests, routing to the selected custom registry instance."""
     if not isinstance(request, dict):
         request_obj: JsonRpcRequest = json.loads(request)
     else:
         request_obj: JsonRpcRequest = request  # type: ignore
 
-    method = request_obj["method"]
-
-    # Handle locally: initialize, notifications, and instance management tools
-    if method == "initialize":
+    if request_obj["method"] == "initialize":
         return dispatch_original(request)
-    elif method.startswith("notifications/"):
+    if request_obj["method"].startswith("notifications/"):
         return dispatch_original(request)
 
-    # Handle instance management tools locally
-    if method == "tools/call":
+    if request_obj["method"] == "tools/call":
         params = request_obj.get("params", {})
         if isinstance(params, dict):
             tool_name = params.get("name", "")
             if tool_name in ("list_instances", "select_instance", "instance_status"):
                 return dispatch_original(request)
 
-    # Handle tools/list: merge local tools with IDA instance tools
-    if method == "tools/list":
+    if request_obj["method"] == "tools/list":
         local_response = dispatch_original(request)
         target = _get_target_instance()
         host = target[0] if target else IDA_HOST
         port = target[1] if target else IDA_PORT
         try:
-            remote_response = _forward_to_ida(host, port, request)
-            # Merge: remote tools + local-only tools
+            remote_response = _proxy_to_ida(request, host, port)
             remote_result = remote_response.get("result") if remote_response else None
             local_result = local_response.get("result") if local_response else None
             if remote_result is not None and local_result is not None:
                 remote_tools = remote_result.get("tools", [])
                 local_tools = local_result.get("tools", [])
-                remote_names = {t["name"] for t in remote_tools}
-                for lt in local_tools:
-                    if lt["name"] not in remote_names:
-                        remote_tools.append(lt)
+                remote_names = {tool["name"] for tool in remote_tools}
+                for local_tool in local_tools:
+                    if local_tool["name"] not in remote_names:
+                        remote_tools.append(local_tool)
                 remote_result["tools"] = remote_tools
             return remote_response
         except Exception:
-            # If IDA is not available, return only local tools
             return local_response
 
-    # Resolve target IDA instance
     target = _get_target_instance()
     host = target[0] if target else IDA_HOST
     port = target[1] if target else IDA_PORT
 
     try:
-        return _forward_to_ida(host, port, request)
+        return _proxy_to_ida(request, host, port)
     except Exception as e:
         full_info = traceback.format_exc()
-        id = request_obj.get("id")
-        if id is None:
+        request_id = request_obj.get("id")
+        if request_id is None:
             return None  # Notification, no response needed
 
-        if sys.platform == "darwin":
-            shortcut = "Ctrl+Option+M"
-        else:
-            shortcut = "Ctrl+Alt+M"
-
-        # Build helpful error message with instance info
+        shortcut = "Ctrl+Option+M" if sys.platform == "darwin" else "Ctrl+Alt+M"
         instances = registry_list_instances()
         if instances:
             instance_list = "\n".join(
                 f"  - {inst.binary_name} ({inst.host}:{inst.port}, id={inst.instance_id})"
                 for inst in instances
             )
-            instance_hint = f"\n\nRegistered instances:\n{instance_list}\n\nUse 'select_instance' tool to choose a target instance."
+            instance_hint = (
+                "\n\nRegistered instances:\n"
+                f"{instance_list}\n\n"
+                "Use 'select_instance' tool to choose a target instance."
+            )
         else:
             instance_hint = ""
-
         return JsonRpcResponse(
             {
                 "jsonrpc": "2.0",
                 "error": {
                     "code": -32000,
-                    "message": f"Failed to connect to IDA Pro at {host}:{port}! Did you run Edit -> Plugins -> MCP ({shortcut}) to start the server?\n{full_info}{instance_hint}",
+                    "message": (
+                        "Failed to complete request to IDA Pro. "
+                        f"Did you run Edit -> Plugins -> MCP ({shortcut}) to start the server?\n"
+                        "The request was not retried automatically. "
+                        "If this was a mutating operation, verify IDA state before retrying.\n"
+                        f"{full_info}{instance_hint}"
+                    ),
                     "data": str(e),
                 },
-                "id": id,
+                "id": request_id,
             }
         )
 
@@ -180,19 +243,9 @@ def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse |
 mcp.registry.dispatch = dispatch_proxy
 
 
-# ============================================================================
-# Instance Management Tools (handled locally by the MCP server)
-# ============================================================================
-
-
 @mcp.tool
 def list_instances() -> dict:
-    """List all active IDA Pro instances with their binary names and connection details.
-
-    Returns a list of all registered IDA instances that are currently running.
-    Each instance includes its binary name, port, instance ID, and status.
-    Use 'select_instance' to choose which instance to send commands to.
-    """
+    """List all active IDA Pro instances from the custom registry."""
     cleanup_stale_instances()
     instances = registry_list_instances()
     return {
@@ -203,21 +256,10 @@ def list_instances() -> dict:
 
 
 @mcp.tool
-def select_instance(
-    target: str,
-) -> dict:
-    """Select which IDA Pro instance to send commands to.
-
-    Select a specific IDA instance by instance ID or binary name.
-    All subsequent tool calls will be routed to the selected instance.
-    Use 'list_instances' to see available instances.
-
-    Args:
-        target: Instance ID or binary name to select
-    """
+def select_instance(target: str) -> dict:
+    """Select which IDA Pro instance to send subsequent commands to."""
     global _target_instance_id
 
-    # Try by instance ID first
     info = find_instance_by_id(target)
     if info and info.is_alive():
         _target_instance_id = info.instance_id
@@ -226,7 +268,6 @@ def select_instance(
             "message": f"Selected instance '{info.instance_id}' analyzing '{info.binary_name}'",
         }
 
-    # Try by binary name
     info = find_instance_by_binary(target)
     if info and info.is_alive():
         _target_instance_id = info.instance_id
@@ -235,7 +276,6 @@ def select_instance(
             "message": f"Selected instance '{info.instance_id}' analyzing '{info.binary_name}'",
         }
 
-    # Not found
     instances = registry_list_instances()
     available = [f"{inst.instance_id} ({inst.binary_name})" for inst in instances]
     return {
@@ -246,14 +286,9 @@ def select_instance(
 
 @mcp.tool
 def instance_status() -> dict:
-    """Get the current connection status and selected IDA Pro instance.
-
-    Shows which IDA instance is currently selected for receiving commands,
-    and lists all available instances.
-    """
+    """Get the current connection status and selected IDA Pro instance."""
     cleanup_stale_instances()
     instances = registry_list_instances()
-
     target = _get_target_instance()
     status = {
         "connected": target is not None,
@@ -263,791 +298,120 @@ def instance_status() -> dict:
         "available_instances": [inst.to_dict() for inst in instances],
         "instance_count": len(instances),
     }
-
     if _target_instance_id:
         info = find_instance_by_id(_target_instance_id)
         if info:
             status["selected_binary"] = info.binary_name
-
     return status
 
 
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-IDA_PLUGIN_PKG = os.path.join(SCRIPT_DIR, "ida_mcp")
-IDA_PLUGIN_LOADER = os.path.join(SCRIPT_DIR, "ida_mcp.py")
+class ProxyHttpRequestHandler(McpHttpRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if _OUTPUT_PATH_RE.match(parsed.path):
+            if not self._check_api_request():
+                return
+            try:
+                status, _, response_headers, body = _proxy_output_download(parsed.path)
+            except Exception as e:
+                self.send_error(502, f"Failed to proxy output download: {e}")
+                return
 
-# NOTE: This is in the global scope on purpose
-if not os.path.exists(IDA_PLUGIN_PKG):
-    raise RuntimeError(
-        f"IDA plugin package not found at {IDA_PLUGIN_PKG} (did you move it?)"
-    )
-if not os.path.exists(IDA_PLUGIN_LOADER):
-    raise RuntimeError(
-        f"IDA plugin loader not found at {IDA_PLUGIN_LOADER} (did you move it?)"
-    )
-
-
-def get_python_executable():
-    """Get the path to the Python executable"""
-    venv = os.environ.get("VIRTUAL_ENV")
-    if venv:
-        if sys.platform == "win32":
-            python = os.path.join(venv, "Scripts", "python.exe")
-        else:
-            python = os.path.join(venv, "bin", "python3")
-        if os.path.exists(python):
-            return python
-
-    for path in sys.path:
-        if sys.platform == "win32":
-            path = path.replace("/", "\\")
-
-        split = path.split(os.sep)
-        if split[-1].endswith(".zip"):
-            path = os.path.dirname(path)
-            if sys.platform == "win32":
-                python_executable = os.path.join(path, "python.exe")
-            else:
-                python_executable = os.path.join(path, "..", "bin", "python3")
-            python_executable = os.path.abspath(python_executable)
-
-            if os.path.exists(python_executable):
-                return python_executable
-    return sys.executable
+            self.send_response(status)
+            for header, value in response_headers:
+                if header.lower() == "transfer-encoding":
+                    continue
+                self.send_header(header, value)
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
 
 
-def copy_python_env(env: dict[str, str]):
-    # Reference: https://docs.python.org/3/using/cmdline.html#environment-variables
-    python_vars = [
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "PYTHONSAFEPATH",
-        "PYTHONPLATLIBDIR",
-        "PYTHONPYCACHEPREFIX",
-        "PYTHONNOUSERSITE",
-        "PYTHONUSERBASE",
-    ]
-    # MCP servers are run without inheriting the environment, so we need to forward
-    # the environment variables that affect Python's dependency resolution by hand.
-    # Issue: https://github.com/mrexodia/ida-pro-mcp/issues/111
-    result = False
-    for var in python_vars:
-        value = os.environ.get(var)
-        if value:
-            result = True
-            env[var] = value
-    return result
+DEFAULT_IDA_RPC = f"http://{IDA_HOST}:{IDA_PORT}"
 
 
-def generate_mcp_config(*, stdio: bool):
-    if stdio:
-        mcp_config = {
-            "command": get_python_executable(),
-            "args": [
-                __file__,
-                "--ida-rpc",
-                f"http://{IDA_HOST}:{IDA_PORT}",
-            ],
-        }
-        env = {}
-        if copy_python_env(env):
-            print("[WARNING] Custom Python environment variables detected")
-            mcp_config["env"] = env
-        return mcp_config
-    else:
-        return {"type": "http", "url": f"http://{IDA_HOST}:{IDA_PORT}/mcp"}
+def _resolve_ida_rpc(args) -> None:
+    """Resolve the IDA RPC target: explicit --ida-rpc, or auto-discovery."""
+    global IDA_HOST, IDA_PORT
 
+    if args.ida_rpc is not None:
+        # Explicit --ida-rpc: use directly (backwards compatible)
+        ida_rpc = urlparse(args.ida_rpc)
+        if ida_rpc.hostname is None or ida_rpc.port is None:
+            raise Exception(f"Invalid IDA RPC server: {args.ida_rpc}")
+        IDA_HOST = ida_rpc.hostname
+        IDA_PORT = ida_rpc.port
 
-def print_mcp_config():
-    print("[HTTP MCP CONFIGURATION]")
-    print(
-        json.dumps(
-            {"mcpServers": {mcp.name: generate_mcp_config(stdio=False)}}, indent=2
-        )
-    )
-    print("\n[STDIO MCP CONFIGURATION]")
-    print(
-        json.dumps(
-            {"mcpServers": {mcp.name: generate_mcp_config(stdio=True)}}, indent=2
-        )
-    )
+        # Preserve ?ext= query param so proxy requests include the extensions
+        ext_value = parse_qs(ida_rpc.query).get("ext", [""])[0]
+        if ext_value:
+            mcp._enabled_extensions.data = set(ext_value.split(","))
 
-
-def install_mcp_servers(*, stdio: bool = False, uninstall=False, quiet=False):
-    # Map client names to their JSON key paths for clients that don't use "mcpServers"
-    # Format: client_name -> (top_level_key, nested_key)
-    # None means use default "mcpServers" at top level
-    special_json_structures = {
-        "VS Code": ("mcp", "servers"),
-        "VS Code Insiders": ("mcp", "servers"),
-        "Visual Studio 2022": (None, "servers"),  # servers at top level
-    }
-
-    if sys.platform == "win32":
-        configs = {
-            "Cline": (
-                os.path.join(
-                    os.getenv("APPDATA", ""),
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "saoudrizwan.claude-dev",
-                    "settings",
-                ),
-                "cline_mcp_settings.json",
-            ),
-            "Roo Code": (
-                os.path.join(
-                    os.getenv("APPDATA", ""),
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "rooveterinaryinc.roo-cline",
-                    "settings",
-                ),
-                "mcp_settings.json",
-            ),
-            "Kilo Code": (
-                os.path.join(
-                    os.getenv("APPDATA", ""),
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "kilocode.kilo-code",
-                    "settings",
-                ),
-                "mcp_settings.json",
-            ),
-            "Claude": (
-                os.path.join(os.getenv("APPDATA", ""), "Claude"),
-                "claude_desktop_config.json",
-            ),
-            "Cursor": (os.path.join(os.path.expanduser("~"), ".cursor"), "mcp.json"),
-            "Windsurf": (
-                os.path.join(os.path.expanduser("~"), ".codeium", "windsurf"),
-                "mcp_config.json",
-            ),
-            "Claude Code": (os.path.join(os.path.expanduser("~")), ".claude.json"),
-            "LM Studio": (
-                os.path.join(os.path.expanduser("~"), ".lmstudio"),
-                "mcp.json",
-            ),
-            "Codex": (os.path.join(os.path.expanduser("~"), ".codex"), "config.toml"),
-            "Zed": (
-                os.path.join(os.getenv("APPDATA", ""), "Zed"),
-                "settings.json",
-            ),
-            "Gemini CLI": (
-                os.path.join(os.path.expanduser("~"), ".gemini"),
-                "settings.json",
-            ),
-            "Qwen Coder": (
-                os.path.join(os.path.expanduser("~"), ".qwen"),
-                "settings.json",
-            ),
-            "Copilot CLI": (
-                os.path.join(os.path.expanduser("~"), ".copilot"),
-                "mcp-config.json",
-            ),
-            "Crush": (
-                os.path.join(os.path.expanduser("~")),
-                "crush.json",
-            ),
-            "Augment Code": (
-                os.path.join(
-                    os.getenv("APPDATA", ""),
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "Qodo Gen": (
-                os.path.join(
-                    os.getenv("APPDATA", ""),
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "Antigravity IDE": (
-                os.path.join(os.path.expanduser("~"), ".gemini", "antigravity"),
-                "mcp_config.json",
-            ),
-            "Warp": (
-                os.path.join(os.path.expanduser("~"), ".warp"),
-                "mcp_config.json",
-            ),
-            "Amazon Q": (
-                os.path.join(os.path.expanduser("~"), ".aws", "amazonq"),
-                "mcp_config.json",
-            ),
-            "Opencode": (
-                os.path.join(os.path.expanduser("~"), ".opencode"),
-                "mcp_config.json",
-            ),
-            "Kiro": (
-                os.path.join(os.path.expanduser("~"), ".kiro"),
-                "mcp_config.json",
-            ),
-            "Trae": (
-                os.path.join(os.path.expanduser("~"), ".trae"),
-                "mcp_config.json",
-            ),
-            "VS Code": (
-                os.path.join(
-                    os.getenv("APPDATA", ""),
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "VS Code Insiders": (
-                os.path.join(
-                    os.getenv("APPDATA", ""),
-                    "Code - Insiders",
-                    "User",
-                ),
-                "settings.json",
-            ),
-        }
-    elif sys.platform == "darwin":
-        configs = {
-            "Cline": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "saoudrizwan.claude-dev",
-                    "settings",
-                ),
-                "cline_mcp_settings.json",
-            ),
-            "Roo Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "rooveterinaryinc.roo-cline",
-                    "settings",
-                ),
-                "mcp_settings.json",
-            ),
-            "Kilo Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "kilocode.kilo-code",
-                    "settings",
-                ),
-                "mcp_settings.json",
-            ),
-            "Claude": (
-                os.path.join(
-                    os.path.expanduser("~"), "Library", "Application Support", "Claude"
-                ),
-                "claude_desktop_config.json",
-            ),
-            "Cursor": (os.path.join(os.path.expanduser("~"), ".cursor"), "mcp.json"),
-            "Windsurf": (
-                os.path.join(os.path.expanduser("~"), ".codeium", "windsurf"),
-                "mcp_config.json",
-            ),
-            "Claude Code": (os.path.join(os.path.expanduser("~")), ".claude.json"),
-            "LM Studio": (
-                os.path.join(os.path.expanduser("~"), ".lmstudio"),
-                "mcp.json",
-            ),
-            "Codex": (os.path.join(os.path.expanduser("~"), ".codex"), "config.toml"),
-            "Antigravity IDE": (
-                os.path.join(os.path.expanduser("~"), ".gemini", "antigravity"),
-                "mcp_config.json",
-            ),
-            "Zed": (
-                os.path.join(
-                    os.path.expanduser("~"), "Library", "Application Support", "Zed"
-                ),
-                "settings.json",
-            ),
-            "Gemini CLI": (
-                os.path.join(os.path.expanduser("~"), ".gemini"),
-                "settings.json",
-            ),
-            "Qwen Coder": (
-                os.path.join(os.path.expanduser("~"), ".qwen"),
-                "settings.json",
-            ),
-            "Copilot CLI": (
-                os.path.join(os.path.expanduser("~"), ".copilot"),
-                "mcp-config.json",
-            ),
-            "Crush": (
-                os.path.join(os.path.expanduser("~")),
-                "crush.json",
-            ),
-            "Augment Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "Qodo Gen": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "BoltAI": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "BoltAI",
-                ),
-                "config.json",
-            ),
-            "Perplexity": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Perplexity",
-                ),
-                "mcp_config.json",
-            ),
-            "Warp": (
-                os.path.join(os.path.expanduser("~"), ".warp"),
-                "mcp_config.json",
-            ),
-            "Amazon Q": (
-                os.path.join(os.path.expanduser("~"), ".aws", "amazonq"),
-                "mcp_config.json",
-            ),
-            "Opencode": (
-                os.path.join(os.path.expanduser("~"), ".opencode"),
-                "mcp_config.json",
-            ),
-            "Kiro": (
-                os.path.join(os.path.expanduser("~"), ".kiro"),
-                "mcp_config.json",
-            ),
-            "Trae": (
-                os.path.join(os.path.expanduser("~"), ".trae"),
-                "mcp_config.json",
-            ),
-            "VS Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "VS Code Insiders": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    "Library",
-                    "Application Support",
-                    "Code - Insiders",
-                    "User",
-                ),
-                "settings.json",
-            ),
-        }
-    elif sys.platform == "linux":
-        configs = {
-            "Cline": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    ".config",
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "saoudrizwan.claude-dev",
-                    "settings",
-                ),
-                "cline_mcp_settings.json",
-            ),
-            "Roo Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    ".config",
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "rooveterinaryinc.roo-cline",
-                    "settings",
-                ),
-                "mcp_settings.json",
-            ),
-            "Kilo Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    ".config",
-                    "Code",
-                    "User",
-                    "globalStorage",
-                    "kilocode.kilo-code",
-                    "settings",
-                ),
-                "mcp_settings.json",
-            ),
-            # Claude not supported on Linux
-            "Cursor": (os.path.join(os.path.expanduser("~"), ".cursor"), "mcp.json"),
-            "Windsurf": (
-                os.path.join(os.path.expanduser("~"), ".codeium", "windsurf"),
-                "mcp_config.json",
-            ),
-            "Claude Code": (os.path.join(os.path.expanduser("~")), ".claude.json"),
-            "LM Studio": (
-                os.path.join(os.path.expanduser("~"), ".lmstudio"),
-                "mcp.json",
-            ),
-            "Codex": (os.path.join(os.path.expanduser("~"), ".codex"), "config.toml"),
-            "Antigravity IDE": (
-                os.path.join(os.path.expanduser("~"), ".gemini", "antigravity"),
-                "mcp_config.json",
-            ),
-            "Zed": (
-                os.path.join(os.path.expanduser("~"), ".config", "zed"),
-                "settings.json",
-            ),
-            "Gemini CLI": (
-                os.path.join(os.path.expanduser("~"), ".gemini"),
-                "settings.json",
-            ),
-            "Qwen Coder": (
-                os.path.join(os.path.expanduser("~"), ".qwen"),
-                "settings.json",
-            ),
-            "Copilot CLI": (
-                os.path.join(os.path.expanduser("~"), ".copilot"),
-                "mcp-config.json",
-            ),
-            "Crush": (
-                os.path.join(os.path.expanduser("~")),
-                "crush.json",
-            ),
-            "Augment Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    ".config",
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "Qodo Gen": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    ".config",
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "Warp": (
-                os.path.join(os.path.expanduser("~"), ".warp"),
-                "mcp_config.json",
-            ),
-            "Amazon Q": (
-                os.path.join(os.path.expanduser("~"), ".aws", "amazonq"),
-                "mcp_config.json",
-            ),
-            "Opencode": (
-                os.path.join(os.path.expanduser("~"), ".opencode"),
-                "mcp_config.json",
-            ),
-            "Kiro": (
-                os.path.join(os.path.expanduser("~"), ".kiro"),
-                "mcp_config.json",
-            ),
-            "Trae": (
-                os.path.join(os.path.expanduser("~"), ".trae"),
-                "mcp_config.json",
-            ),
-            "VS Code": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    ".config",
-                    "Code",
-                    "User",
-                ),
-                "settings.json",
-            ),
-            "VS Code Insiders": (
-                os.path.join(
-                    os.path.expanduser("~"),
-                    ".config",
-                    "Code - Insiders",
-                    "User",
-                ),
-                "settings.json",
-            ),
-        }
-    else:
-        print(f"Unsupported platform: {sys.platform}")
+        set_ida_rpc(IDA_HOST, IDA_PORT)
         return
 
-    installed = 0
-    for name, (config_dir, config_file) in configs.items():
-        config_path = os.path.join(config_dir, config_file)
-        is_toml = config_file.endswith(".toml")
-
-        if not os.path.exists(config_dir):
-            action = "uninstall" if uninstall else "installation"
-            if not quiet:
-                print(f"Skipping {name} {action}\n  Config: {config_path} (not found)")
-            continue
-
-        # Read existing config
-        if not os.path.exists(config_path):
-            config = {}
-        else:
-            with open(
-                config_path,
-                "rb" if is_toml else "r",
-                encoding=None if is_toml else "utf-8",
-            ) as f:
-                if is_toml:
-                    data = f.read()
-                    if len(data) == 0:
-                        config = {}
-                    else:
-                        try:
-                            config = tomllib.loads(data.decode("utf-8"))
-                        except tomllib.TOMLDecodeError:
-                            if not quiet:
-                                print(
-                                    f"Skipping {name} uninstall\n  Config: {config_path} (invalid TOML)"
-                                )
-                            continue
-                else:
-                    data = f.read().strip()
-                    if len(data) == 0:
-                        config = {}
-                    else:
-                        try:
-                            config = json.loads(data)
-                        except json.decoder.JSONDecodeError:
-                            if not quiet:
-                                print(
-                                    f"Skipping {name} uninstall\n  Config: {config_path} (invalid JSON)"
-                                )
-                            continue
-
-        # Handle TOML vs JSON structure
-        if is_toml:
-            if "mcp_servers" not in config:
-                config["mcp_servers"] = {}
-            mcp_servers = config["mcp_servers"]
-        else:
-            # Check if this client uses a special JSON structure
-            if name in special_json_structures:
-                top_key, nested_key = special_json_structures[name]
-                if top_key is None:
-                    # servers at top level (e.g., Visual Studio 2022)
-                    if nested_key not in config:
-                        config[nested_key] = {}
-                    mcp_servers = config[nested_key]
-                else:
-                    # nested structure (e.g., VS Code uses mcp.servers)
-                    if top_key not in config:
-                        config[top_key] = {}
-                    if nested_key not in config[top_key]:
-                        config[top_key][nested_key] = {}
-                    mcp_servers = config[top_key][nested_key]
-            else:
-                # Default: mcpServers at top level
-                if "mcpServers" not in config:
-                    config["mcpServers"] = {}
-                mcp_servers = config["mcpServers"]
-
-        # Migrate old name
-        old_name = "github.com/mrexodia/ida-pro-mcp"
-        if old_name in mcp_servers:
-            mcp_servers[mcp.name] = mcp_servers[old_name]
-            del mcp_servers[old_name]
-
-        if uninstall:
-            if mcp.name not in mcp_servers:
-                if not quiet:
-                    print(
-                        f"Skipping {name} uninstall\n  Config: {config_path} (not installed)"
-                    )
-                continue
-            del mcp_servers[mcp.name]
-        else:
-            mcp_servers[mcp.name] = generate_mcp_config(stdio=stdio)
-
-        # Atomic write: temp file + rename
-        suffix = ".toml" if is_toml else ".json"
-        fd, temp_path = tempfile.mkstemp(
-            dir=config_dir, prefix=".tmp_", suffix=suffix, text=True
-        )
-        try:
-            with os.fdopen(
-                fd, "wb" if is_toml else "w", encoding=None if is_toml else "utf-8"
-            ) as f:
-                if is_toml:
-                    f.write(tomli_w.dumps(config).encode("utf-8"))
-                else:
-                    json.dump(config, f, indent=2)
-            os.replace(temp_path, config_path)
-        except:
-            os.unlink(temp_path)
-            raise
-
-        if not quiet:
-            action = "Uninstalled" if uninstall else "Installed"
-            print(
-                f"{action} {name} MCP server (restart required)\n  Config: {config_path}"
-            )
-        installed += 1
-    if not uninstall and installed == 0:
+    # Auto-discover running IDA instances using the custom registry.
+    cleanup_stale_instances()
+    instances = registry_list_instances()
+    if len(instances) == 0:
         print(
-            "No MCP servers installed. For unsupported MCP clients, use the following config:\n"
+            f"[MCP] No IDA instances discovered, using default {IDA_HOST}:{IDA_PORT}",
+            file=sys.stderr,
         )
-        print_mcp_config()
-
-
-def install_ida_plugin(
-    *, uninstall: bool = False, quiet: bool = False, allow_ida_free: bool = False
-):
-    if sys.platform == "win32":
-        ida_folder = os.path.join(os.environ["APPDATA"], "Hex-Rays", "IDA Pro")
+    elif len(instances) == 1:
+        inst = instances[0]
+        IDA_HOST = inst.host
+        IDA_PORT = inst.port
+        print(
+            f"[MCP] Auto-connected to: {inst.binary_name} at {IDA_HOST}:{IDA_PORT}",
+            file=sys.stderr,
+        )
     else:
-        ida_folder = os.path.join(os.path.expanduser("~"), ".idapro")
-    if not allow_ida_free:
-        free_licenses = glob.glob(os.path.join(ida_folder, "idafree_*.hexlic"))
-        if len(free_licenses) > 0:
+        print(f"[MCP] Found {len(instances)} IDA instances:", file=sys.stderr)
+        for i, inst in enumerate(instances):
             print(
-                "IDA Free does not support plugins and cannot be used. Purchase and install IDA Pro instead."
+                f"  [{i}] {inst.binary_name} at {inst.host}:{inst.port} (id={inst.instance_id})",
+                file=sys.stderr,
             )
-            sys.exit(1)
-    ida_plugin_folder = os.path.join(ida_folder, "plugins")
-
-    # Install both the loader file and package directory
-    loader_source = IDA_PLUGIN_LOADER
-    loader_destination = os.path.join(ida_plugin_folder, "ida_mcp.py")
-
-    pkg_source = IDA_PLUGIN_PKG
-    pkg_destination = os.path.join(ida_plugin_folder, "ida_mcp")
-
-    # Clean up old plugin if it exists
-    old_plugin = os.path.join(ida_plugin_folder, "mcp-plugin.py")
-
-    if uninstall:
-        # Remove loader
-        if os.path.lexists(loader_destination):
-            os.remove(loader_destination)
-            if not quiet:
-                print(f"Uninstalled IDA plugin loader\n  Path: {loader_destination}")
-
-        # Remove package
-        if os.path.exists(pkg_destination):
-            if os.path.isdir(pkg_destination) and not os.path.islink(pkg_destination):
-                shutil.rmtree(pkg_destination)
-            else:
-                os.remove(pkg_destination)
-            if not quiet:
-                print(f"Uninstalled IDA plugin package\n  Path: {pkg_destination}")
-
-        # Remove old plugin if it exists
-        if os.path.lexists(old_plugin):
-            os.remove(old_plugin)
-            if not quiet:
-                print(f"Removed old plugin\n  Path: {old_plugin}")
-    else:
-        # Create IDA plugins folder
-        if not os.path.exists(ida_plugin_folder):
-            os.makedirs(ida_plugin_folder)
-
-        # Remove old plugin if it exists
-        if os.path.lexists(old_plugin):
-            os.remove(old_plugin)
-            if not quiet:
-                print(f"Removed old plugin file\n  Path: {old_plugin}")
-
-        installed_items = []
-
-        # Install loader file
-        loader_realpath = (
-            os.path.realpath(loader_destination)
-            if os.path.lexists(loader_destination)
-            else None
+        inst = instances[0]
+        IDA_HOST = inst.host
+        IDA_PORT = inst.port
+        print(
+            f"[MCP] Auto-selected: {inst.binary_name}. "
+            "Pass --ida-rpc http://host:port to override.",
+            file=sys.stderr,
         )
-        if loader_realpath != loader_source:
-            if os.path.lexists(loader_destination):
-                os.remove(loader_destination)
 
-            try:
-                os.symlink(loader_source, loader_destination)
-                installed_items.append(f"loader: {loader_destination}")
-            except OSError:
-                shutil.copy(loader_source, loader_destination)
-                installed_items.append(f"loader: {loader_destination}")
-
-        # Install package directory
-        pkg_realpath = (
-            os.path.realpath(pkg_destination)
-            if os.path.lexists(pkg_destination)
-            else None
-        )
-        if pkg_realpath != pkg_source:
-            if os.path.lexists(pkg_destination):
-                if os.path.isdir(pkg_destination) and not os.path.islink(
-                    pkg_destination
-                ):
-                    shutil.rmtree(pkg_destination)
-                else:
-                    os.remove(pkg_destination)
-
-            try:
-                os.symlink(pkg_source, pkg_destination)
-                installed_items.append(f"package: {pkg_destination}")
-            except OSError:
-                shutil.copytree(pkg_source, pkg_destination)
-                installed_items.append(f"package: {pkg_destination}")
-
-        if not quiet:
-            if installed_items:
-                print("Installed IDA Pro plugin (IDA restart required)")
-                for item in installed_items:
-                    print(f"  {item}")
-            else:
-                print("Skipping IDA plugin installation (already up to date)")
+    set_ida_rpc(IDA_HOST, IDA_PORT)
 
 
 def main():
     global IDA_HOST, IDA_PORT
+
     parser = argparse.ArgumentParser(description="IDA Pro MCP Server")
     parser.add_argument(
-        "--install", action="store_true", help="Install the MCP Server and IDA plugin"
+        "--install",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TARGETS",
+        help="Install the MCP Server and IDA plugin. "
+        "The IDA plugin is installed immediately. "
+        "Optionally specify comma-separated client targets (e.g., 'claude,cursor'). "
+        "Without targets, an interactive selector is shown.",
     )
     parser.add_argument(
         "--uninstall",
-        action="store_true",
-        help="Uninstall the MCP Server and IDA plugin",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TARGETS",
+        help="Uninstall the MCP Server and IDA plugin. "
+        "The IDA plugin is uninstalled immediately. "
+        "Optionally specify comma-separated client targets. "
+        "Without targets, an interactive selector is shown.",
     )
     parser.add_argument(
         "--allow-ida-free",
@@ -1057,39 +421,59 @@ def main():
     parser.add_argument(
         "--transport",
         type=str,
-        default="stdio",
-        help="MCP transport protocol to use (stdio or http://127.0.0.1:8744)",
+        default=None,
+        help="MCP transport for install: 'streamable-http' (default), 'stdio', or 'sse'. "
+        "For running: use stdio (default) or pass a URL (e.g., http://127.0.0.1:8744[/mcp|/sse])",
+    )
+    parser.add_argument(
+        "--scope",
+        type=str,
+        choices=["global", "project"],
+        default=None,
+        help="Installation scope: 'project' (current directory, default) or 'global' (user-level)",
     )
     parser.add_argument(
         "--ida-rpc",
         type=str,
-        default=f"http://{IDA_HOST}:{IDA_PORT}",
-        help=f"IDA RPC server to use (default: http://{IDA_HOST}:{IDA_PORT})",
+        default=None,
+        help=f"IDA RPC server (default: auto-discover, fallback: {DEFAULT_IDA_RPC})",
     )
     parser.add_argument(
         "--config", action="store_true", help="Generate MCP config JSON"
     )
+    parser.add_argument(
+        "--list-clients",
+        action="store_true",
+        help="List all available MCP client targets",
+    )
     args = parser.parse_args()
 
-    # Parse IDA RPC server argument
-    ida_rpc = urlparse(args.ida_rpc)
-    if ida_rpc.hostname is None or ida_rpc.port is None:
-        raise Exception(f"Invalid IDA RPC server: {args.ida_rpc}")
-    IDA_HOST = ida_rpc.hostname
-    IDA_PORT = ida_rpc.port
+    # Handle --list-clients independently
+    if args.list_clients:
+        list_available_clients()
+        return
 
-    if args.install and args.uninstall:
+    # Resolve IDA RPC target (explicit or auto-discovery)
+    _resolve_ida_rpc(args)
+
+    is_install = args.install is not None
+    is_uninstall = args.uninstall is not None
+
+    # Validate flag combinations
+    if args.scope and not (is_install or is_uninstall):
+        print("--scope requires --install or --uninstall")
+        return
+
+    if is_install and is_uninstall:
         print("Cannot install and uninstall at the same time")
         return
 
-    if args.install:
-        install_ida_plugin(allow_ida_free=args.allow_ida_free)
-        install_mcp_servers(stdio=(args.transport == "stdio"))
-        return
-
-    if args.uninstall:
-        install_ida_plugin(uninstall=True, allow_ida_free=args.allow_ida_free)
-        install_mcp_servers(uninstall=True)
+    if is_install or is_uninstall:
+        run_install_command(
+            uninstall=is_uninstall,
+            targets_str=args.install if is_install else args.uninstall,
+            args=args,
+        )
         return
 
     if args.config:
@@ -1097,14 +481,15 @@ def main():
         return
 
     try:
-        if args.transport == "stdio":
+        transport = args.transport or "stdio"
+        if transport == "stdio":
             mcp.stdio()
         else:
-            url = urlparse(args.transport)
+            url = urlparse(transport)
             if url.hostname is None or url.port is None:
                 raise Exception(f"Invalid transport URL: {args.transport}")
             # NOTE: npx -y @modelcontextprotocol/inspector for debugging
-            mcp.serve(url.hostname, url.port)
+            mcp.serve(url.hostname, url.port, request_handler=ProxyHttpRequestHandler)
             input("Server is running, press Enter or Ctrl+C to stop.")
     except (KeyboardInterrupt, EOFError):
         pass
