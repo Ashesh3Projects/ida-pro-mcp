@@ -14,10 +14,10 @@ from ida_pro_mcp.ida_mcp.api_core import (
     ServerWarmupResult,
     server_warmup,
 )
-from ida_pro_mcp.ida_mcp.discovery import register_instance, unregister_instance
 from ida_pro_mcp.ida_mcp.http import IdaMcpHttpRequestHandler
 from ida_pro_mcp.ida_mcp.profile import apply_profile, load_profile
 from ida_pro_mcp.ida_mcp.rpc import set_download_base_url, tool
+from ida_pro_mcp.instance_registry import register_instance, unregister_instance
 from ida_pro_mcp.idalib_session_manager import get_session_manager
 from ida_pro_mcp.worker_lifecycle import WorkerLifecycle
 
@@ -59,37 +59,37 @@ IDB_MANAGEMENT_TOOLS = {
 
 
 _LIFECYCLE = WorkerLifecycle()
-_REGISTERED_PORT: int | None = None
+_REGISTERED_INSTANCE_ID: str | None = None
 _BOUND_HOST: str = ""
 _BOUND_PORT: int = 0
 
 
-def _register_in_discovery(host: str, port: int, input_path: Path) -> None:
-    global _REGISTERED_PORT
+def _register_in_registry(host: str, port: int, input_path: Path) -> None:
+    global _REGISTERED_INSTANCE_ID
     try:
+        instance_id = f"idalib-{os.getpid()}-{port}"
         register_instance(
+            instance_id=instance_id,
             host=host,
             port=port,
-            pid=os.getpid(),
-            binary=input_path.name,
-            idb_path=str(input_path),
-            backend="worker",
+            binary_name=input_path.name,
+            binary_path=str(input_path),
         )
-        _REGISTERED_PORT = port
-        logger.info("Registered idalib worker in discovery (port %d)", port)
+        _REGISTERED_INSTANCE_ID = instance_id
+        logger.info("Registered idalib worker in instance registry (port %d)", port)
     except Exception:
-        logger.exception("Failed to register worker in discovery")
+        logger.exception("Failed to register worker in instance registry")
 
 
-def _deregister_from_discovery() -> None:
-    global _REGISTERED_PORT
-    if _REGISTERED_PORT is None:
+def _deregister_from_registry() -> None:
+    global _REGISTERED_INSTANCE_ID
+    if _REGISTERED_INSTANCE_ID is None:
         return
     try:
-        unregister_instance(_REGISTERED_PORT)
+        unregister_instance(_REGISTERED_INSTANCE_ID)
     except Exception:
         logger.debug("Failed to unregister worker", exc_info=True)
-    _REGISTERED_PORT = None
+    _REGISTERED_INSTANCE_ID = None
 
 
 @tool
@@ -127,8 +127,8 @@ def idb_open(
                 init_hexrays=init_hexrays,
             )
         _LIFECYCLE.set_idle_ttl(float(idle_ttl_sec), time.monotonic() - load_started_at)
-        if _REGISTERED_PORT is None and _BOUND_HOST and _BOUND_PORT:
-            _register_in_discovery(_BOUND_HOST, _BOUND_PORT, session.input_path)
+        if _REGISTERED_INSTANCE_ID is None and _BOUND_HOST and _BOUND_PORT:
+            _register_in_registry(_BOUND_HOST, _BOUND_PORT, session.input_path)
         return {
             "success": True,
             "session": session.to_dict(),
@@ -228,7 +228,7 @@ def main():
         resolved = args.input_path.resolve()
         session_id = session_manager.open_binary(resolved, run_auto_analysis=True)
         logger.info("Initial session created: %s", session_id)
-        _register_in_discovery(args.host, args.port, resolved)
+        _register_in_registry(args.host, args.port, resolved)
     else:
         logger.info(
             "No initial binary specified. Use idb_open() to load binaries dynamically."
@@ -302,7 +302,7 @@ def main():
         # .stop(), watchdog called .stop(), or the loop errored out.
         logger.info("Server loop exited; cleaning up")
         _LIFECYCLE.stop()
-        _deregister_from_discovery()
+        _deregister_from_registry()
         try:
             session_manager.close_all_sessions()
         except Exception:
