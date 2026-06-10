@@ -11,6 +11,7 @@ With coverage:
     uv run coverage html
 """
 
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -76,18 +77,16 @@ With coverage:
         help="Show IDA console messages",
     )
     parser.add_argument(
-        "--sample-size",
-        "-n",
-        type=int,
-        default=5,
-        help="Number of items for sampling-based tests (default: 5)",
+        "--mcp-mode",
+        action="store_true",
+        help="Route every @tool call through a real MCP client/server "
+        "round-trip and validate responses against outputSchema",
     )
-
     args = parser.parse_args()
 
-    # Check binary exists
-    if not args.binary.exists():
-        print(f"Error: Binary not found: {args.binary}", file=sys.stderr)
+    # Check binary exists and is a file
+    if not args.binary.is_file():
+        print(f"Error: Binary not found or not a file: {args.binary}", file=sys.stderr)
         return 1
 
     # Configure IDA console output
@@ -108,14 +107,27 @@ With coverage:
     print()
 
     try:
-        # Import test framework and API modules AFTER idalib is initialized
-        # This triggers the @test decorators to register tests
-        from ida_pro_mcp.ida_mcp.framework import run_tests, TESTS, set_sample_size
+        # Import test framework AFTER idalib is initialized
+        from ida_pro_mcp.ida_mcp.framework import run_tests, TESTS
 
-        # Import all test modules to register the tests
+        # Import all test modules to register @test decorators.
+        # Use pkgutil discovery so registration works even if tests package
+        # __init__ does not eagerly import submodules.
+        import importlib
+        import pkgutil
 
-        # Configure sample size for deterministic sampling helpers
-        set_sample_size(args.sample_size)
+        tests_pkg_name = "ida_pro_mcp.ida_mcp.tests"
+        tests_pkg = importlib.import_module(tests_pkg_name)
+        if hasattr(tests_pkg, "__path__"):
+            for mod in pkgutil.iter_modules(tests_pkg.__path__):
+                if mod.name.startswith("test_"):
+                    importlib.import_module(f"{tests_pkg_name}.{mod.name}")
+
+        if not TESTS:
+            print(
+                "Warning: no tests were registered from ida_pro_mcp.ida_mcp.tests",
+                file=sys.stderr,
+            )
 
         # Handle --list
         if args.list:
@@ -135,12 +147,35 @@ With coverage:
             return 0
 
         # Run tests
-        results = run_tests(
-            pattern=args.pattern,
-            category=args.category,
-            verbose=not args.quiet,
-            stop_on_failure=args.stop_on_failure,
-        )
+        in_ci = os.environ.get("CI", "").lower() not in ("", "0", "false", "no")
+        interactive_output = sys.stdout.isatty()
+        show_all_test_output = (not args.quiet) and (interactive_output or in_ci)
+
+        def _run():
+            return run_tests(
+                pattern=args.pattern,
+                category=args.category,
+                verbose=show_all_test_output,
+                stop_on_failure=args.stop_on_failure,
+                failures_only=(not args.quiet) and not show_all_test_output,
+            )
+
+        if args.mcp_mode:
+            from ida_pro_mcp.ida_mcp.tests.mcp_mode import mcp_mode
+
+            print("[MCP] Running tests in end-to-end MCP mode.")
+            with mcp_mode():
+                results = _run()
+        else:
+            results = _run()
+
+        # No matched tests is likely a configuration/test-selection mistake
+        if not results.results:
+            print(
+                "Error: no tests matched the requested pattern/category",
+                file=sys.stderr,
+            )
+            return 1
 
         # In quiet mode, print summary
         if args.quiet:
