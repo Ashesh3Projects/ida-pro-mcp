@@ -339,7 +339,7 @@ wheels = [
 
 [[package]]
 name = "ida-pro-mcp"
-version = "2.0.0"
+version = "2.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "idapro" },
@@ -364,7 +364,7 @@ requires-dist = [
 dev = [
     { name = "coverage", specifier = ">=7.13.4" },
     { name = "jsonschema", specifier = ">=4.0" },
-    { name = "mcp", specifier = ">=1.23.0" },
+    { name = "mcp", specifier = ">=1.0" },
     { name = "pytest", specifier = ">=9.0.3" },
 ]
 

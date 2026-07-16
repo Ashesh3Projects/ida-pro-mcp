@@ -753,13 +753,19 @@ def get_function(addr: int, *, raise_error: Literal[False]) -> Optional[Function
 def get_function(addr, *, raise_error=True):
     from . import compat
 
-    fn = idaapi.get_func(addr)
-    if fn is None:
+    if hasattr(ida_funcs, "get_func_entry_info"):
+        fn = ida_funcs.func_entry_info_t()
+        found = ida_funcs.get_func_entry_info(fn, addr, ida_funcs.GFI_NAME)
+        name = fn.get_name() if found else None
+    else:
+        fn = ida_funcs.get_func(addr)
+        found = fn is not None
+        name = compat.get_func_name(fn) if fn is not None else None
+
+    if not found:
         if raise_error:
             raise IDAError(f"No function found at address {hex(addr)}")
         return None
-
-    name = compat.get_func_name(fn)
 
     return Function(addr=hex(fn.start_ea), name=name, size=hex(fn.end_ea - fn.start_ea))
 

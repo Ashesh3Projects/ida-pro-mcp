@@ -2,14 +2,8 @@
 
 This file serves as the entry point for IDA Pro's plugin system.
 It loads the actual implementation from the ida_mcp package.
-
-Supports:
-- Dynamic port allocation to avoid conflicts between multiple IDA instances
-- Instance registration for multi-instance discovery and routing
-- Start/Stop/Status server control via plugin hotkey (toggle)
 """
 
-import os
 import sys
 import uuid
 import idaapi
@@ -19,7 +13,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from . import ida_mcp
-    from .instance_registry import HeartbeatThread
 
 
 NETNODE_AUTOSTART = "$ ida_mcp.autostart"
@@ -194,7 +187,7 @@ class MCPConfigHandler(idaapi.action_handler_t):
         # Apply new endpoint immediately if the server is running.
         if endpoint_changed and self.plugin.mcp is not None:
             print("[MCP] Applying configuration change without manual restart...")
-            self.plugin.run(0)
+            self.plugin._restart_server()
         return 1
 
     def update(self, ctx):
@@ -237,8 +230,7 @@ class MCP(idaapi.plugin_t):
             hotkey = hotkey.replace("Alt", "Option")
 
         self.mcp: "ida_mcp.rpc.McpServer | None" = None
-        self.instance_id: str = uuid.uuid4().hex[:8]
-        self.heartbeat: "HeartbeatThread | None" = None
+        self.instance_id = uuid.uuid4().hex[:8]
         self.autostart = _get_autostart()
         self.persist_endpoint = _get_persist()
         if self.persist_endpoint:
@@ -254,7 +246,7 @@ class MCP(idaapi.plugin_t):
             print("[MCP] Plugin loaded (idalib mode, server managed externally)")
         else:
             print(
-                f"[MCP] Plugin loaded, use Edit -> Plugins -> MCP ({hotkey}) to start the server"
+                f"[MCP] Plugin loaded, use Edit -> Plugins -> MCP ({hotkey}) to start/stop the server"
             )
 
         # Register a separate menu item for host/port configuration
@@ -271,13 +263,29 @@ class MCP(idaapi.plugin_t):
 
         return idaapi.PLUGIN_KEEP
 
+    def _unregister_instance(self):
+        port = getattr(self, "_registered_port", None)
+        if port is not None:
+            try:
+                if TYPE_CHECKING:
+                    from .ida_mcp.discovery import unregister_instance
+                else:
+                    from ida_mcp.discovery import unregister_instance
+                unregister_instance(port)
+            except Exception as e:
+                print(f"[MCP] Instance unregistration failed: {e}")
+            self._registered_port = None
+
     def run(self, arg):
         if self.mcp:
-            self._unregister_instance()
-            self.mcp.stop()
-            self.mcp = None
+            self._stop_server()
             print("[MCP] Server stopped")
             return
+
+        self._start_server()
+
+    def _start_server(self):
+        """Start the server and register this IDA instance."""
 
         # HACK: ensure fresh load of ida_mcp package
         unload_package("ida_mcp")
@@ -286,7 +294,7 @@ class MCP(idaapi.plugin_t):
         else:
             from ida_mcp import MCP_SERVER, IdaMcpHttpRequestHandler
 
-        port = self._select_port()
+        port = self.port
         max_port = port + 100
         while port < max_port:
             try:
@@ -296,7 +304,6 @@ class MCP(idaapi.plugin_t):
                 print(f"  Config: http://{self.host}:{port}/config.html")
                 self.mcp = MCP_SERVER
                 self._register_instance(port)
-                self.port = port
                 return
             except OSError as e:
                 if e.errno in (48, 98, 10048):  # Address already in use
@@ -305,73 +312,52 @@ class MCP(idaapi.plugin_t):
                     raise
         print(f"[MCP] Error: No available port in range {self.port}-{max_port - 1}")
 
-    def _select_port(self) -> int:
-        """Choose a port using the custom instance registry when possible."""
-        env_port = os.environ.get("IDA_MCP_PORT")
-        if env_port:
-            return int(env_port)
-        try:
-            from ida_pro_mcp.instance_registry import find_available_port
-            return find_available_port(self.host)
-        except Exception:
-            return self.port
-
-    def _get_binary_name(self) -> str:
-        """Get the name of the binary being analyzed in IDA."""
-        try:
-            import ida_nalt
-            return ida_nalt.get_root_filename() or "unknown"
-        except Exception:
-            return "unknown"
-
-    def _get_binary_path(self) -> str:
-        """Get the full path of the binary being analyzed in IDA."""
-        try:
-            import ida_nalt
-            return ida_nalt.get_input_file_path() or ""
-        except Exception:
-            return ""
-
     def _register_instance(self, port: int):
-        """Register this instance in the custom multi-instance registry."""
         try:
-            from ida_pro_mcp.instance_registry import register_instance, HeartbeatThread
-            binary_name = self._get_binary_name()
-            binary_path = self._get_binary_path()
-            register_instance(
-                instance_id=self.instance_id,
+            if TYPE_CHECKING:
+                from .ida_mcp.discovery import register_instance
+            else:
+                from ida_mcp.discovery import register_instance
+            import os
+            import idc
+            import ida_nalt
+            binary = ida_nalt.get_root_filename() or ""
+            binary_path = ida_nalt.get_input_file_path() or ""
+            idb_path = idc.get_idb_path() or ""
+            file_path = register_instance(
                 host=self.host,
                 port=port,
-                binary_name=binary_name,
+                pid=os.getpid(),
+                binary=binary,
                 binary_path=binary_path,
+                idb_path=idb_path,
+                instance_id=self.instance_id,
             )
-            self.heartbeat = HeartbeatThread(self.instance_id)
-            self.heartbeat.start()
-            print(f"  Instance: {self.instance_id} ({binary_name})")
-            print(f"  Port: {port}")
+            self._registered_port = port
+            print(f"[MCP] Registered instance: {binary} (pid={os.getpid()}, port={port})")
+            print(f"  Discovery file: {file_path}")
         except Exception as e:
             import traceback
             print(f"[MCP] Instance registration failed: {e}")
             traceback.print_exc()
 
-    def _unregister_instance(self):
-        """Unregister this instance from the custom multi-instance registry."""
-        if self.heartbeat:
-            self.heartbeat.stop()
-            self.heartbeat = None
-        try:
-            from ida_pro_mcp.instance_registry import unregister_instance
-            unregister_instance(self.instance_id)
-        except Exception as e:
-            print(f"[MCP] Instance unregistration failed: {e}")
+    def _stop_server(self):
+        """Stop the server and remove its discovery registration."""
+        self._unregister_instance()
+        if self.mcp:
+            self.mcp.stop()
+            self.mcp = None
+
+    def _restart_server(self):
+        """Apply configuration changes without changing toggle semantics."""
+        self._stop_server()
+        self._start_server()
 
     def term(self):
         if hasattr(self, "_ui_hooks"):
             self._ui_hooks.unhook()
         ida_kernwin.unregister_action(CONFIG_ACTION_ID)
-        self._unregister_instance()
-        if self.mcp:
-            self.mcp.stop()
+        self._stop_server()
 
 
 def PLUGIN_ENTRY():
