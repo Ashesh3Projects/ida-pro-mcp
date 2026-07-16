@@ -176,6 +176,46 @@ def get_ordinal_limit(til: ida_typeinf.til_t | None = None) -> int:
 # ============================================================================
 
 
+_native_get_inf_structure = getattr(idaapi, "get_inf_structure", None)
+if getattr(_native_get_inf_structure, "__ida_mcp_compat__", False):
+    _native_get_inf_structure = None
+
+
+class InfStructureCompat:
+    """Read-only adapter for the legacy ``idaapi.get_inf_structure()`` API.
+
+    IDA 9.4 removed ``get_inf_structure`` and exposes database metadata through
+    ``ida_ida.inf_get_*`` and ``ida_ida.inf_is_*`` functions instead. Resolve
+    attributes lazily so existing read-only IDAPython snippets keep working
+    without caching database-specific values.
+    """
+
+    def __getattr__(self, name: str):
+        if IDA_GE_85:
+            getter = getattr(ida_ida, f"inf_get_{name}", None)
+            if getter is not None:
+                return getter()
+
+            predicate = getattr(ida_ida, f"inf_{name}", None)
+            if predicate is not None:
+                return predicate
+
+            if name == "is_32bit":
+                return ida_ida.inf_is_32bit_exactly
+
+        raise AttributeError(f"inf structure has no attribute {name!r}")
+
+
+def get_inf_structure():
+    """Return IDA's native inf object or a modern read-only compatibility view."""
+    if _native_get_inf_structure is not None:
+        return _native_get_inf_structure()
+    return InfStructureCompat()
+
+
+get_inf_structure.__ida_mcp_compat__ = True
+
+
 def inf_get_min_ea() -> int:
     if IDA_GE_85:
         return ida_ida.inf_get_min_ea()

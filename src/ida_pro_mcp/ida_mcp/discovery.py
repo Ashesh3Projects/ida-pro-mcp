@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from typing import TypedDict
 
 
@@ -28,10 +29,12 @@ class LaunchInstanceResult(TypedDict, total=False):
 
 
 class InstanceInfo(TypedDict, total=False):
+    instance_id: str
     host: str
     port: int
     pid: int
     binary: str
+    binary_path: str
     idb_path: str
     started_at: str
     backend: str  # "gui" or "worker"
@@ -47,19 +50,46 @@ def get_instances_dir() -> str:
     return os.path.join(_get_ida_user_dir(), "mcp", "instances")
 
 
+def get_legacy_instances_dir() -> str:
+    """Return the registry directory used by the pre-9.4 multi-instance fork."""
+    return os.path.join(os.path.expanduser("~"), ".ida-mcp", "instances")
+
+
+def get_instance_dirs() -> list[str]:
+    """Return current and legacy registry directories in preference order."""
+    directories = [get_instances_dir(), get_legacy_instances_dir()]
+    result = []
+    seen = set()
+    for path in directories:
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
 def _instance_file_path(port: int) -> str:
     return os.path.join(get_instances_dir(), f"instance_{port}.json")
 
 
 def register_instance(
-    host: str, port: int, pid: int, binary: str, idb_path: str, backend: str = "gui"
+    host: str,
+    port: int,
+    pid: int,
+    binary: str,
+    idb_path: str,
+    backend: str = "gui",
+    instance_id: str = "",
+    binary_path: str = "",
 ) -> str:
     """Write an instance registration file. Returns the file path."""
     info: InstanceInfo = {
+        "instance_id": instance_id or uuid.uuid4().hex[:8],
         "host": host,
         "port": port,
         "pid": pid,
         "binary": binary,
+        "binary_path": binary_path,
         "idb_path": idb_path,
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "backend": backend,
@@ -127,51 +157,74 @@ def probe_instance(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 def discover_instances() -> list[InstanceInfo]:
-    """Scan for registered instances, cleaning up stale entries."""
-    instances_dir = get_instances_dir()
-    if not os.path.isdir(instances_dir):
-        return []
+    """Scan current and legacy registries, cleaning and deduplicating entries."""
+    instances_by_endpoint: dict[tuple[str, int], InstanceInfo] = {}
 
-    result: list[InstanceInfo] = []
-    pattern = os.path.join(instances_dir, "instance_*.json")
-    for file_path in glob.glob(pattern):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                info: InstanceInfo = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            try:
-                os.unlink(file_path)
-            except OSError:
-                pass
+    for instances_dir in get_instance_dirs():
+        if not os.path.isdir(instances_dir):
             continue
 
-        if not all(k in info for k in ("host", "port", "pid")):
+        for file_path in glob.glob(os.path.join(instances_dir, "*.json")):
+            # register_instance writes through .tmp_*.json + os.replace(). Never
+            # inspect or delete a writer's in-progress atomic temp file.
+            if os.path.basename(file_path).startswith(".tmp_"):
+                continue
             try:
-                os.unlink(file_path)
-            except OSError:
-                pass
-            continue
+                with open(file_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                try:
+                    os.unlink(file_path)
+                except OSError:
+                    pass
+                continue
 
-        if not is_pid_alive(info["pid"]):
-            try:
-                os.unlink(file_path)
-            except OSError:
-                pass
-            continue
+            # Normalize the fork's legacy schema to the upstream schema.
+            if "binary" not in raw and "binary_name" in raw:
+                raw["binary"] = raw["binary_name"]
+            # Legacy ``timestamp`` is a heartbeat, not a process start time.
+            # Leave started_at empty so legacy entries sort deterministically
+            # by endpoint instead of reshuffling on every heartbeat.
+            raw.setdefault("started_at", "")
+            raw.setdefault("binary_path", "")
+            raw.setdefault("idb_path", raw.get("binary_path", ""))
+            raw.setdefault("backend", "gui")
+            info: InstanceInfo = raw
 
-        # Secondary check: verify the instance is actually listening.
-        # Catches PID reuse (Windows can recycle PIDs quickly) and
-        # cases where the process is alive but the server crashed.
-        if not probe_instance(info["host"], info["port"], timeout=1.0):
-            try:
-                os.unlink(file_path)
-            except OSError:
-                pass
-            continue
+            if not all(key in info for key in ("host", "port", "pid")):
+                try:
+                    os.unlink(file_path)
+                except OSError:
+                    pass
+                continue
 
-        result.append(info)
+            if not is_pid_alive(info["pid"]):
+                try:
+                    os.unlink(file_path)
+                except OSError:
+                    pass
+                continue
 
-    result.sort(key=lambda x: x.get("started_at", ""))
+            # Verify the listener too, catching PID reuse and crashed servers.
+            if not probe_instance(info["host"], info["port"], timeout=1.0):
+                try:
+                    os.unlink(file_path)
+                except OSError:
+                    pass
+                continue
+
+            endpoint = (str(info["host"]), int(info["port"]))
+            instances_by_endpoint.setdefault(endpoint, info)
+
+    result = list(instances_by_endpoint.values())
+    result.sort(
+        key=lambda item: (
+            1 if item.get("started_at") else 0,
+            item.get("started_at", ""),
+            str(item.get("host", "")),
+            int(item.get("port", 0)),
+        )
+    )
     return result
 
 

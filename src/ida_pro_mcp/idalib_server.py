@@ -72,6 +72,7 @@ def _register_in_discovery(host: str, port: int, input_path: Path) -> None:
             port=port,
             pid=os.getpid(),
             binary=input_path.name,
+            binary_path=str(input_path),
             idb_path=str(input_path),
             backend="worker",
         )
@@ -287,7 +288,7 @@ def main():
     trace.install_tracer()
     logger.info("Tracing tools/call to IDB netnode %s", trace.IDB_NETNODE_NAME)
 
-    if not "IDA_MCP_URL" in os.environ:
+    if "IDA_MCP_URL" not in os.environ:
         set_download_base_url(f"http://{args.host}:{args.port}")
 
     try:

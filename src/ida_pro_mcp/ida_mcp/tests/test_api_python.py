@@ -37,6 +37,28 @@ def test_py_eval_jupyter_style_last_expression():
 
 
 @test()
+def test_py_eval_callbacks_share_globals():
+    """Callbacks defined by py_eval can read variables assigned in the same script."""
+    code = "values = []\ndef callback(value):\n    values.append(value)\ncallback(7)\nvalues"
+    result = py_eval(code)
+    assert result["result"] == "[7]"
+    assert result["stderr"] == ""
+
+
+@test()
+def test_py_eval_legacy_get_inf_structure_adapter():
+    """IDA 9.4 py_eval keeps legacy read-only metadata scripts working."""
+    code = (
+        "inf = idaapi.get_inf_structure()\n"
+        "result = (hex(inf.min_ea), hex(inf.max_ea), inf.is_64bit())"
+    )
+    result = py_eval(code)
+    assert result["result"].startswith("('0x")
+    assert result["result"].endswith(", True)")
+    assert result["stderr"] == ""
+
+
+@test()
 def test_py_eval_stdout_capture():
     """py_eval captures stdout separately from the result value."""
     result = py_eval('print("hello from ida")\nresult = 7')

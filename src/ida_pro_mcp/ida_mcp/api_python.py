@@ -24,6 +24,7 @@ import os
 from .rpc import tool, unsafe
 from .sync import idasync
 from .utils import parse_address, get_function
+from . import compat
 
 # ============================================================================
 # Shared execution context
@@ -32,6 +33,11 @@ from .utils import parse_address, get_function
 
 def _make_exec_globals() -> dict:
     """Build an execution context with all IDA modules available."""
+    # IDA 9.4 removed this long-standing helper. Restore it for py_eval scripts
+    # with a read-only adapter backed by the current ida_ida.inf_* APIs.
+    if not hasattr(idaapi, "get_inf_structure"):
+        idaapi.get_inf_structure = compat.get_inf_structure
+
     def lazy_import(module_name):
         try:
             return __import__(module_name)
@@ -91,6 +97,7 @@ def _make_exec_globals() -> dict:
         "ida_undo": lazy_import("ida_undo"),
         "ida_xref": ida_xref,
         "ida_enum": lazy_import("ida_enum"),
+        "compat": compat,
         "parse_address": parse_address,
         "get_function": get_function,
     }
@@ -113,7 +120,12 @@ class PythonExecResult(TypedDict):
 def py_eval(
     code: Annotated[str, "Python code"],
 ) -> PythonExecResult:
-    """Execute Python in IDA context and return result/stdout/stderr."""
+    """Execute Python in IDA context and return result/stdout/stderr.
+
+    Statements and callbacks share one global namespace. On modern IDA, use
+    ida_ida.inf_get_* or the preloaded compat helpers instead of the removed
+    idaapi.get_inf_structure API.
+    """
     # Capture stdout/stderr
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
@@ -125,22 +137,22 @@ def py_eval(
         sys.stderr = stderr_capture
 
         exec_globals = _make_exec_globals()
+        initial_keys = set(exec_globals)
 
         result_value = None
-        exec_locals = {}
 
         # Parse code with AST to properly handle execution
         try:
             tree = ast.parse(code)
         except SyntaxError:
             # If parsing fails, fall back to direct exec
-            exec(code, exec_globals, exec_locals)
-            exec_globals.update(exec_locals)
-            if "result" in exec_locals:
-                result_value = str(exec_locals["result"])
-            elif exec_locals:
-                last_key = list(exec_locals.keys())[-1]
-                result_value = str(exec_locals[last_key])
+            exec(code, exec_globals)
+            if "result" in exec_globals:
+                result_value = str(exec_globals["result"])
+            else:
+                new_keys = [key for key in exec_globals if key not in initial_keys]
+                if new_keys:
+                    result_value = str(exec_globals[new_keys[-1]])
         else:
             if not tree.body:
                 # Empty code
@@ -156,9 +168,7 @@ def py_eval(
                     exec(
                         compile(exec_tree, "<string>", "exec"),
                         exec_globals,
-                        exec_locals,
                     )
-                    exec_globals.update(exec_locals)
                 # Eval only the last expression
                 eval_tree = ast.Expression(body=tree.body[-1].value)
                 result_value = str(
@@ -166,15 +176,15 @@ def py_eval(
                 )
             else:
                 # All statements (no trailing expression)
-                exec(code, exec_globals, exec_locals)
-                exec_globals.update(exec_locals)
+                exec(code, exec_globals)
                 # Return 'result' variable if explicitly set
-                if "result" in exec_locals:
-                    result_value = str(exec_locals["result"])
+                if "result" in exec_globals:
+                    result_value = str(exec_globals["result"])
                 # Return last assigned variable
-                elif exec_locals:
-                    last_key = list(exec_locals.keys())[-1]
-                    result_value = str(exec_locals[last_key])
+                else:
+                    new_keys = [key for key in exec_globals if key not in initial_keys]
+                    if new_keys:
+                        result_value = str(exec_globals[new_keys[-1]])
 
         # Collect output
         stdout_text = stdout_capture.getvalue()
@@ -191,7 +201,7 @@ def py_eval(
 
         return {
             "result": "",
-            "stdout": "",
+            "stdout": stdout_capture.getvalue(),
             "stderr": traceback.format_exc(),
         }
     finally:

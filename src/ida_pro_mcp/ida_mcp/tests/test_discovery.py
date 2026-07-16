@@ -20,25 +20,31 @@ from .. import discovery
 
 @contextlib.contextmanager
 def _tmp_instances_dir():
-    """Redirect discovery.get_instances_dir to a temp directory, then restore."""
+    """Redirect every discovery registry to one temp directory."""
     with tempfile.TemporaryDirectory() as tmp:
-        original = discovery.get_instances_dir
+        original_current = discovery.get_instances_dir
+        original_legacy = discovery.get_legacy_instances_dir
         discovery.get_instances_dir = lambda: tmp
+        discovery.get_legacy_instances_dir = lambda: tmp
         try:
             yield tmp
         finally:
-            discovery.get_instances_dir = original
+            discovery.get_instances_dir = original_current
+            discovery.get_legacy_instances_dir = original_legacy
 
 
 @contextlib.contextmanager
 def _patched_instances_dir(path):
-    """Redirect discovery.get_instances_dir to an arbitrary path, then restore."""
-    original = discovery.get_instances_dir
+    """Redirect every discovery registry to an arbitrary path."""
+    original_current = discovery.get_instances_dir
+    original_legacy = discovery.get_legacy_instances_dir
     discovery.get_instances_dir = lambda: path
+    discovery.get_legacy_instances_dir = lambda: path
     try:
         yield
     finally:
-        discovery.get_instances_dir = original
+        discovery.get_instances_dir = original_current
+        discovery.get_legacy_instances_dir = original_legacy
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +60,25 @@ def test_register_unregister_roundtrip():
         assert os.path.isfile(path)
         assert discovery.unregister_instance(55000) is True
         assert not os.path.isfile(path)
+
+
+@test()
+def test_register_persists_instance_id_and_binary_path():
+    """Discovery metadata includes the fork-compatible identity and input path."""
+    with _tmp_instances_dir() as tmp:
+        discovery.register_instance(
+            "127.0.0.1",
+            55001,
+            os.getpid(),
+            "test.exe",
+            "/tmp/test.i64",
+            instance_id="abc12345",
+            binary_path="/tmp/test.exe",
+        )
+        with open(os.path.join(tmp, "instance_55001.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["instance_id"] == "abc12345"
+        assert data["binary_path"] == "/tmp/test.exe"
 
 
 @test()
@@ -128,6 +153,17 @@ def test_discover_cleans_up_corrupt_json():
 
 
 @test()
+def test_discover_ignores_atomic_temp_files():
+    """Discovery never consumes or deletes an in-progress registration write."""
+    with _tmp_instances_dir() as tmp:
+        temp_path = os.path.join(tmp, ".tmp_in_progress.json")
+        with open(temp_path, "w") as f:
+            f.write("{")
+        assert discovery.discover_instances() == []
+        assert os.path.isfile(temp_path)
+
+
+@test()
 def test_discover_cleans_up_missing_required_keys():
     """discover_instances removes registrations missing host/port/pid."""
     with _tmp_instances_dir() as tmp:
@@ -189,3 +225,56 @@ def test_discover_sorts_by_started_at():
         finally:
             discovery.is_pid_alive = orig_pid
             discovery.probe_instance = orig_probe
+
+
+@test()
+def test_discover_normalizes_and_deduplicates_legacy_entries():
+    """Legacy fork registrations remain selectable during an in-place upgrade."""
+    with tempfile.TemporaryDirectory() as current, tempfile.TemporaryDirectory() as legacy:
+        current_info = {
+            "instance_id": "current1",
+            "host": "127.0.0.1",
+            "port": 55020,
+            "pid": os.getpid(),
+            "binary": "current.dll",
+            "binary_path": "/tmp/current.dll",
+            "idb_path": "/tmp/current.i64",
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+        legacy_info = {
+            "instance_id": "legacy1",
+            "host": "127.0.0.1",
+            "port": 55021,
+            "pid": os.getpid(),
+            "binary_name": "legacy.dll",
+            "binary_path": "/tmp/legacy.dll",
+            "timestamp": 1_767_225_600,
+        }
+        duplicate = {**legacy_info, "instance_id": "duplicate", "port": 55020}
+
+        with open(os.path.join(current, "instance_55020.json"), "w") as f:
+            json.dump(current_info, f)
+        with open(os.path.join(legacy, "legacy1.json"), "w") as f:
+            json.dump(legacy_info, f)
+        with open(os.path.join(legacy, "duplicate.json"), "w") as f:
+            json.dump(duplicate, f)
+
+        original_dirs = discovery.get_instance_dirs
+        original_pid = discovery.is_pid_alive
+        original_probe = discovery.probe_instance
+        discovery.get_instance_dirs = lambda: [current, legacy]
+        discovery.is_pid_alive = lambda pid: True
+        discovery.probe_instance = lambda host, port, timeout=2.0: True
+        try:
+            results = discovery.discover_instances()
+        finally:
+            discovery.get_instance_dirs = original_dirs
+            discovery.is_pid_alive = original_pid
+            discovery.probe_instance = original_probe
+
+        assert len(results) == 2
+        by_port = {item["port"]: item for item in results}
+        assert by_port[55020]["instance_id"] == "current1"
+        assert by_port[55021]["binary"] == "legacy.dll"
+        assert by_port[55021]["idb_path"] == "/tmp/legacy.dll"
+        assert results[0]["port"] == 55021
