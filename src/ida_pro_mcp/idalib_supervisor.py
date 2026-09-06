@@ -52,9 +52,32 @@ IDB_OPEN_MODES = {
 IDB_MANAGEMENT_TOOLS = {
     "idb_open",
     "idb_list",
+    "idb_close",
 }
-WORKER_TCP_HEALTH_TIMEOUT_SEC = 0.5
-WORKER_RPC_HEALTH_TIMEOUT_SEC = 2.0
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+# A worker cannot answer a ping while a tool occupies its IDA main thread, so
+# probing must separate "process gone" (reap) from "alive but busy" (wait).
+WORKER_TCP_HEALTH_TIMEOUT_SEC = _env_float("IDA_MCP_HEALTH_TCP_TIMEOUT", 2.0)
+WORKER_RPC_HEALTH_TIMEOUT_SEC = _env_float("IDA_MCP_HEALTH_RPC_TIMEOUT", 10.0)
+WORKER_QUICK_TCP_TIMEOUT_SEC = 0.5
+WORKER_QUICK_RPC_TIMEOUT_SEC = 2.0
+WORKER_HEALTH_RETRIES = int(_env_float("IDA_MCP_HEALTH_RETRIES", 3))
+WORKER_HEALTH_RETRY_BACKOFF_SEC = _env_float("IDA_MCP_HEALTH_RETRY_BACKOFF", 1.0)
+# How long a live-but-silent worker is tolerated before counting as wedged.
+# Generous: analysing a large database legitimately takes a while. 0 disables.
+WORKER_WEDGED_GRACE_SEC = _env_float("IDA_MCP_WEDGED_GRACE_SEC", 1800.0)
+# Backstop on a forwarded tools/call; the worker has its own per-tool
+# timeouts. 0 waits indefinitely.
+WORKER_CALL_TIMEOUT_SEC = _env_float("IDA_MCP_WORKER_CALL_TIMEOUT", 900.0)
+
+PARTIAL_DATABASE_EXTENSIONS = (".id0", ".id1", ".id2", ".nam", ".til")
 
 # Upper bound (seconds) on how long a worker may take to open and auto-analyze a
 # binary before it is reaped and an error is returned. A malformed or hostile
@@ -116,6 +139,7 @@ class IdalibSessionInfo(TypedDict):
 
 class IdalibSessionListInfo(IdalibSessionInfo, total=False):
     is_active: bool
+    busy: bool
     backend: str
     owned: bool
     adopted: bool
@@ -137,6 +161,17 @@ class IdalibListResult(TypedDict, total=False):
     error: str
 
 
+class IdalibCloseResult(TypedDict, total=False):
+    success: bool
+    session_id: str
+    backend: str
+    owned: bool
+    saved: bool | None
+    save_error: str
+    message: str
+    error: str
+
+
 @dataclass
 class WorkerSession:
     session_id: str
@@ -153,6 +188,7 @@ class WorkerSession:
     owned: bool = True
     pid: int | None = None
     last_warmup: dict[str, Any] | None = None
+    unresponsive_since: float | None = None
 
     def to_dict(self) -> IdalibSessionInfo:
         return {
@@ -289,18 +325,41 @@ class IdalibSupervisor:
             proc.wait(timeout=5)
 
     @staticmethod
-    def _cleanup_partial_database(input_path: str) -> None:
+    def _partial_database_paths(input_path: str) -> tuple[Path, ...]:
+        base = Path(input_path)
+        return tuple(
+            base.with_name(base.name + ext)
+            for ext in PARTIAL_DATABASE_EXTENSIONS
+        )
+
+    @classmethod
+    def _existing_partial_database_parts(cls, input_path: str) -> set[Path]:
+        return {
+            part
+            for part in cls._partial_database_paths(input_path)
+            if part.exists()
+        }
+
+    @classmethod
+    def _cleanup_partial_database(
+        cls,
+        input_path: str,
+        *,
+        preserve: set[Path] | None = None,
+    ) -> None:
         """Remove leftover unpacked IDA database parts after a failed/aborted open.
 
         When a worker is reaped mid-open (for example on an analysis timeout), the
         partially written .id0/.id1/.id2/.nam/.til files are left next to the input.
         IDA then rejects every subsequent open of that path with
         "database is corrupted beyond repair", turning a one-off failure into a
-        permanent one. The packed .i64/.idb (a complete saved database) is kept.
+        permanent one. The packed .i64/.idb (a complete saved database) and any
+        unpacked parts that predated this open attempt are kept.
         """
-        base = Path(input_path)
-        for ext in (".id0", ".id1", ".id2", ".nam", ".til"):
-            part = base.with_name(base.name + ext)
+        preserved = preserve or set()
+        for part in cls._partial_database_paths(input_path):
+            if part in preserved:
+                continue
             try:
                 if part.exists():
                     part.unlink()
@@ -344,7 +403,7 @@ class IdalibSupervisor:
         stale_session_ids = [
             session.session_id
             for session in self.sessions.values()
-            if session.backend == "worker" and session.owned and not self._session_is_reachable(session)
+            if session.backend == "worker" and session.owned and self._process_exited(session)
         ]
         for session_id in stale_session_ids:
             stale = self._unregister_session_locked(session_id)
@@ -499,29 +558,94 @@ class IdalibSupervisor:
     def _session_is_reachable(self, session: WorkerSession) -> bool:
         return bool(self._probe_session_health(session)["reachable"])
 
-    def _probe_session_health(self, session: WorkerSession) -> dict[str, Any]:
-        process_alive = session.is_alive()
+    def _session_is_usable(self, session: WorkerSession) -> bool:
+        """True unless the session is provably gone; a busy worker stays usable.
+
+        Quick timeouts: callers hold the lock and a dead worker refuses the
+        connection at once, so waiting longer only pins the lock.
+        """
+        health = self._probe_session_health(
+            session,
+            tcp_timeout=WORKER_QUICK_TCP_TIMEOUT_SEC,
+            rpc_timeout=WORKER_QUICK_RPC_TIMEOUT_SEC,
+        )
+        return self._health_state(health) != "dead"
+
+    def _concurrent_session_for_path(self, resolved: str) -> WorkerSession | None:
+        """Session another thread registered for `resolved` while we opened.
+
+        Two clients can now open the same binary at once; the loser's idb_open
+        fails on the database lock. Return the winner rather than erroring —
+        and never clean up working files that are now the winner's.
+        """
+        with self._lock:
+            existing = self.path_to_session.get(self._path_key(resolved))
+            if existing is None:
+                return None
+            session = self.sessions.get(existing)
+            if session is None or not self._session_is_usable(session):
+                return None
+            session.last_accessed = datetime.now()
+            return session
+
+    def _process_exited(self, session: WorkerSession) -> bool:
+        process = session.process
+        return process is not None and process.poll() is not None
+
+    def _probe_session_health(
+        self,
+        session: WorkerSession,
+        *,
+        tcp_timeout: float | None = None,
+        rpc_timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Classify a session as ok / busy / dead.
+
+        `busy` is alive but not answering, i.e. mid tool call. Only `dead`
+        justifies reaping.
+        """
         result: dict[str, Any] = {
             "backend": session.backend,
-            "process_alive": process_alive,
+            "process_alive": None,
             "tcp_connect": None,
             "rpc_ping": None,
             "reachable": False,
+            "state": "dead",
             "failed_probe": None,
             "error": None,
         }
-        if not process_alive:
+
+        if session.backend != "worker":
+            alive = session.is_alive()
+            result["process_alive"] = alive
+            result["reachable"] = alive
+            result["state"] = "ok" if alive else "dead"
+            if not alive:
+                result["failed_probe"] = "process"
+                result["error"] = "instance is not responding"
+            return result
+
+        if self._process_exited(session):
+            result["process_alive"] = False
             result["failed_probe"] = "process"
             result["error"] = "worker process is not running"
             return result
-        if session.backend != "worker":
-            result["reachable"] = True
+        # Adopted workers have no Popen handle, so liveness is unknown here.
+        result["process_alive"] = True if session.process is not None else None
+
+        def busy(probe: str, error: str) -> dict[str, Any]:
+            result["failed_probe"] = probe
+            result["error"] = error
+            # A completed TCP handshake proves the listener is up, which is
+            # all we have for adopted workers we hold no process handle for.
+            alive = result["process_alive"] is True or result["tcp_connect"] is True
+            result["state"] = "busy" if alive else "dead"
             return result
 
         try:
             with socket.create_connection(
                 (session.host, session.port),
-                timeout=WORKER_TCP_HEALTH_TIMEOUT_SEC,
+                timeout=tcp_timeout or WORKER_TCP_HEALTH_TIMEOUT_SEC,
             ):
                 pass
         except Exception as e:
@@ -531,16 +655,14 @@ class IdalibSupervisor:
                 exc_info=True,
             )
             result["tcp_connect"] = False
-            result["failed_probe"] = "tcp_connect"
-            result["error"] = str(e)
-            return result
+            return busy("tcp_connect", str(e))
         result["tcp_connect"] = True
 
         try:
             response = self._worker_rpc(
                 session,
                 {"jsonrpc": "2.0", "id": 1, "method": "ping"},
-                timeout=WORKER_RPC_HEALTH_TIMEOUT_SEC,
+                timeout=rpc_timeout or WORKER_RPC_HEALTH_TIMEOUT_SEC,
             )
         except Exception as e:
             logger.debug(
@@ -549,19 +671,47 @@ class IdalibSupervisor:
                 exc_info=True,
             )
             result["rpc_ping"] = False
-            result["failed_probe"] = "rpc_ping"
-            result["error"] = str(e)
-            return result
+            return busy("rpc_ping", str(e))
 
         if "error" in response:
             result["rpc_ping"] = False
-            result["failed_probe"] = "rpc_ping"
-            result["error"] = response["error"].get("message", "JSON-RPC ping returned error")
-            return result
+            return busy(
+                "rpc_ping", response["error"].get("message", "JSON-RPC ping returned error")
+            )
 
         result["rpc_ping"] = True
         result["reachable"] = True
+        result["state"] = "ok"
         return result
+
+    @staticmethod
+    def _health_state(health: dict[str, Any]) -> str:
+        state = health.get("state")
+        if state:
+            return str(state)
+        return "ok" if health.get("reachable") else "dead"
+
+    def _probe_session_health_retrying(self, session: WorkerSession) -> dict[str, Any]:
+        health = self._probe_session_health(session)
+        for attempt in range(1, max(0, WORKER_HEALTH_RETRIES)):
+            if self._health_state(health) != "busy":
+                break
+            time.sleep(WORKER_HEALTH_RETRY_BACKOFF_SEC * attempt)
+            health = self._probe_session_health(session)
+        health["state"] = self._health_state(health)
+        return health
+
+    def _record_health_state(self, session: WorkerSession, state: str) -> bool:
+        """Track how long a live worker has been silent. Returns True if wedged."""
+        if state != "busy":
+            session.unresponsive_since = None
+            return False
+        now = time.monotonic()
+        if session.unresponsive_since is None:
+            session.unresponsive_since = now
+        if WORKER_WEDGED_GRACE_SEC <= 0:
+            return False
+        return (now - session.unresponsive_since) >= WORKER_WEDGED_GRACE_SEC
 
     def _unregister_session_locked(self, session_id: str) -> WorkerSession | None:
         session = self.sessions.pop(session_id, None)
@@ -642,7 +792,7 @@ class IdalibSupervisor:
             existing = self.path_to_session.get(self._path_key(resolved_path))
             if existing is not None:
                 existing_session = self.sessions.get(existing)
-                if existing_session is not None and self._session_is_reachable(existing_session):
+                if existing_session is not None and self._session_is_usable(existing_session):
                     existing_session.last_accessed = datetime.now()
                     return existing_session
                 self._unregister_session_locked(existing)
@@ -678,7 +828,7 @@ class IdalibSupervisor:
             existing = self.path_to_session.get(self._path_key(resolved))
             if existing is not None:
                 session = self.sessions.get(existing)
-                if session is not None and self._session_is_reachable(session):
+                if session is not None and self._session_is_usable(session):
                     session.last_accessed = datetime.now()
                     return session
                 self._unregister_session_locked(existing)
@@ -724,6 +874,7 @@ class IdalibSupervisor:
             return self._launch_gui_and_adopt(resolved, session_id)
 
         open_timeout = (WORKER_OPEN_TIMEOUT_SEC or None) if run_auto_analysis else None
+        preexisting_parts = self._existing_partial_database_parts(resolved)
         try:
             opened = self.call_worker_tool(
                 worker,
@@ -742,7 +893,10 @@ class IdalibSupervisor:
                 raise RuntimeError(str(opened["error"]))
         except TimeoutError:
             self._terminate_worker(worker)
-            self._cleanup_partial_database(resolved)
+            winner = self._concurrent_session_for_path(resolved)
+            if winner is not None:
+                return winner
+            self._cleanup_partial_database(resolved, preserve=preexisting_parts)
             raise RuntimeError(
                 f"idalib worker timed out after {open_timeout:.0f}s while opening and "
                 f"analyzing {resolved}. The binary may drive auto-analysis into an "
@@ -751,6 +905,10 @@ class IdalibSupervisor:
             ) from None
         except Exception:
             self._terminate_worker(worker)
+            winner = self._concurrent_session_for_path(resolved)
+            if winner is not None:
+                return winner
+            self._cleanup_partial_database(resolved, preserve=preexisting_parts)
             raise
 
         worker_session = opened.get("session", {}) if isinstance(opened, dict) else {}
@@ -772,7 +930,7 @@ class IdalibSupervisor:
             existing = self.path_to_session.get(self._path_key(resolved))
             if existing is not None:
                 existing_session = self.sessions.get(existing)
-                if existing_session is not None and self._session_is_reachable(existing_session):
+                if existing_session is not None and self._session_is_usable(existing_session):
                     existing_session.last_accessed = datetime.now()
                 else:
                     self._unregister_session_locked(existing)
@@ -784,7 +942,7 @@ class IdalibSupervisor:
             if existing_session is None:
                 existing_by_id = self.sessions.get(session_id)
                 if existing_by_id is not None:
-                    if self._session_is_reachable(existing_by_id):
+                    if self._session_is_usable(existing_by_id):
                         existing_by_id.last_accessed = datetime.now()
                         session_collision_error = ValueError(f"Session already exists: {session_id}")
                     else:
@@ -826,6 +984,7 @@ class IdalibSupervisor:
         resolved = self._resolve_gui_fallback_path(session)
         with self._lock:
             worker = self._allocate_worker_locked()
+        preexisting_parts = self._existing_partial_database_parts(resolved)
         try:
             opened = self.call_worker_tool(
                 worker,
@@ -842,6 +1001,7 @@ class IdalibSupervisor:
                 raise RuntimeError(str(opened["error"]))
         except Exception:
             self._terminate_worker(worker)
+            self._cleanup_partial_database(resolved, preserve=preexisting_parts)
             raise
 
         worker_session = opened.get("session", {}) if isinstance(opened, dict) else {}
@@ -864,7 +1024,7 @@ class IdalibSupervisor:
             if current is session:
                 self._register_session_locked(replacement, resolved)
                 return replacement
-            if current is not None and self._session_is_reachable(current):
+            if current is not None and self._session_is_usable(current):
                 current.last_accessed = datetime.now()
                 replacement_session = current
                 reopen_error = None
@@ -885,9 +1045,41 @@ class IdalibSupervisor:
 
     def resolve_session(self, database: str) -> WorkerSession:
         session = self.peek_session(database)
-        if self._session_is_reachable(session):
+        # Short timeouts: a busy worker is forwarded to anyway, so waiting
+        # longer here only adds latency to every call.
+        health = self._probe_session_health(
+            session,
+            tcp_timeout=WORKER_QUICK_TCP_TIMEOUT_SEC,
+            rpc_timeout=WORKER_QUICK_RPC_TIMEOUT_SEC,
+        )
+        state = self._health_state(health)
+        wedged = self._record_health_state(session, state)
+        if state == "ok":
             session.last_accessed = datetime.now()
             return session
+        if state == "busy":
+            if not wedged:
+                # Mid tool call: let the request queue on the worker rather
+                # than killing the analysis.
+                logger.info(
+                    "Worker session %s is busy (%s); forwarding anyway",
+                    session.session_id,
+                    health.get("failed_probe"),
+                )
+                session.last_accessed = datetime.now()
+                return session
+            # Silent past the grace window: confirm with generous timeouts
+            # before killing a process that may still be working.
+            confirmed = self._probe_session_health_retrying(session)
+            if self._health_state(confirmed) == "ok":
+                self._record_health_state(session, "ok")
+                session.last_accessed = datetime.now()
+                return session
+            logger.warning(
+                "Worker session %s unresponsive for over %.0fs; reaping",
+                session.session_id,
+                WORKER_WEDGED_GRACE_SEC,
+            )
         if session.backend == "gui":
             return self._reopen_gui_session_headless(session)
         session_id = session.session_id
@@ -908,11 +1100,63 @@ class IdalibSupervisor:
             session.last_accessed = datetime.now()
             return session
 
+    def close_session(self, database: str, *, save: bool = True) -> IdalibCloseResult:
+        """Save (optionally), unregister, and terminate a session's owned worker.
+
+        Adopted GUI/worker instances (``owned`` is False) are detached rather
+        than killed: they keep running so another supervisor can adopt them.
+        """
+        session = self.peek_session(database)
+        saved: bool | None = None
+        save_error: str | None = None
+        if save and self._session_is_reachable(session):
+            try:
+                result = self.call_worker_tool(session, "idb_save")
+                if isinstance(result, dict):
+                    saved = bool(result.get("ok"))
+                    if result.get("error"):
+                        save_error = str(result["error"])
+            except Exception as e:
+                save_error = str(e)
+
+        with self._lock:
+            if self.sessions.get(database) is session:
+                self._unregister_session_locked(database)
+        self._terminate_worker(session)
+        if saved and session.owned:
+            # The worker is SIGTERM'd without a clean close_database(), so the
+            # working files it unpacked stay behind; the save above already
+            # rewrote the packed database.
+            self._cleanup_partial_database(session.input_path)
+
+        info: IdalibCloseResult = {
+            "success": True,
+            "session_id": database,
+            "backend": session.backend,
+            "owned": session.owned,
+            "saved": saved,
+            "message": f"Session closed: {session.filename} ({database})",
+        }
+        if save_error is not None:
+            info["save_error"] = save_error
+        return info
+
+    def _session_list_entry(self, session: WorkerSession) -> IdalibSessionListInfo:
+        """Listing must stay snappy, so probe with short timeouts only."""
+        health = self._probe_session_health(
+            session,
+            tcp_timeout=WORKER_QUICK_TCP_TIMEOUT_SEC,
+            rpc_timeout=WORKER_QUICK_RPC_TIMEOUT_SEC,
+        )
+        state = self._health_state(health)
+        entry = session.to_list_dict(active=state != "dead")
+        entry["busy"] = state == "busy"
+        return entry
+
     def list_sessions(self) -> list[IdalibSessionListInfo]:
         with self._lock:
             adopted = [
-                session.to_list_dict(active=self._session_is_reachable(session))
-                for session in self.sessions.values()
+                self._session_list_entry(session) for session in self.sessions.values()
             ]
             adopted_path_keys = {
                 key
@@ -1088,6 +1332,23 @@ def idb_list() -> IdalibListResult:
         return {"error": f"Failed to list sessions: {e}"}
 
 
+@mcp.tool
+def idb_close(
+    database: Annotated[str, "Session ID returned by idb_open (see idb_list)."],
+    save: Annotated[bool, "Save the database before closing"] = True,
+) -> IdalibCloseResult:
+    """
+    Close a session: optionally save it, unregister it from the supervisor, and
+    terminate its owned worker (freeing a worker slot). Adopted GUI/worker instances
+    are detached, not killed.
+    """
+    sup = _require_supervisor()
+    try:
+        return sup.close_session(database, save=save)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @mcp.resource("ida://databases")
 def databases_resource() -> dict:
     """List open idalib worker databases."""
@@ -1127,7 +1388,25 @@ def _handle_tools_call(request_obj: dict[str, Any]) -> dict[str, Any] | None:
     forwarded = copy.deepcopy(request_obj)
     forwarded.setdefault("params", {})["arguments"] = arguments
     try:
-        return sup._worker_rpc(session, forwarded)
+        return sup._worker_rpc(
+            session, forwarded, timeout=WORKER_CALL_TIMEOUT_SEC or None
+        )
+    except socket.timeout:
+        return _jsonrpc_result(
+            request_id,
+            _call_tool_result(
+                {
+                    "error": (
+                        f"Worker for session '{database}' did not respond within "
+                        f"{WORKER_CALL_TIMEOUT_SEC:.0f}s; it is still busy with an "
+                        f"earlier call. The session is kept open — retry later or "
+                        f"raise IDA_MCP_WORKER_CALL_TIMEOUT."
+                    ),
+                    "busy": True,
+                },
+                is_error=True,
+            ),
+        )
     except Exception as e:
         return _jsonrpc_result(request_id, _call_tool_result({"error": str(e)}, is_error=True))
 
@@ -1246,7 +1525,9 @@ def main() -> None:
         if args.stdio:
             mcp.stdio()
         else:
-            mcp.serve(host=args.host, port=args.port, background=False)
+            # Threaded: a call to one busy worker must not block requests
+            # aimed at a different, idle one.
+            mcp.serve(host=args.host, port=args.port, background=False, threaded=True)
     finally:
         if supervisor is not None:
             supervisor.shutdown()

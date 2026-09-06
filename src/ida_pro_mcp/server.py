@@ -512,17 +512,40 @@ class ProxyHttpRequestHandler(McpHttpRequestHandler):
         if _OUTPUT_PATH_RE.match(parsed.path):
             if not self._check_api_request():
                 return
+            if self._has_unexpected_body():
+                self.send_error(400, "Request body is not allowed")
+                return
             try:
                 status, _, response_headers, body = _proxy_output_download(parsed.path)
             except Exception as e:
                 self.send_error(502, f"Failed to proxy output download: {e}")
                 return
 
+            # The backend response is fully buffered and dechunked. Its framing
+            # and connection-specific headers do not describe this connection.
+            excluded_headers = {
+                "connection",
+                "content-length",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailer",
+                "transfer-encoding",
+                "upgrade",
+            }
+            for header, value in response_headers:
+                if header.lower() == "connection":
+                    excluded_headers.update(
+                        token.strip().lower() for token in value.split(",")
+                    )
+
             self.send_response(status)
             for header, value in response_headers:
-                if header.lower() == "transfer-encoding":
+                if header.lower() in excluded_headers:
                     continue
                 self.send_header(header, value)
+            self.send_header("Content-Length", str(len(body)))
             self.send_cors_headers()
             self.end_headers()
             self.wfile.write(body)

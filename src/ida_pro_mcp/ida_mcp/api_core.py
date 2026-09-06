@@ -20,6 +20,7 @@ import ida_nalt
 import ida_typeinf
 import idc
 
+from .mainthread import get_pump
 from .rpc import tool
 from .sync import idasync, get_tool_deadline
 from .utils import (
@@ -45,7 +46,7 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
-class ServerHealthResult(TypedDict):
+class ServerHealthResult(TypedDict, total=False):
     status: str
     uptime_sec: float
     idb_path: str | None
@@ -56,6 +57,9 @@ class ServerHealthResult(TypedDict):
     hexrays_ready: bool
     strings_cache_ready: bool
     strings_cache_size: int
+    busy_tool: str
+    busy_sec: float
+    queued_calls: int
 
 
 class ServerWarmupStep(TypedDict, total=False):
@@ -145,10 +149,19 @@ _server_started_at = time.time()
 
 
 def _get_strings_cache() -> list[tuple[int, str]]:
-    """Get cached strings, building cache on first access."""
+    """Get cached strings, building cache on first access.
+
+    Both ASCII (C-style) and UTF-16 (wide) strings are scanned so that
+    ``find_regex`` can locate wide-char strings, which are common in Unreal
+    Engine and Windows binaries. ``idautils.Strings()`` defaults to
+    ``strtypes=[0]`` (C strings only), missing UTF-16 content — see #263.
+    """
     global _strings_cache
     if _strings_cache is None:
-        _strings_cache = [(s.ea, str(s)) for s in idautils.Strings() if s is not None]
+        strings = idautils.Strings()
+        # strtype 0 = C (ASCII/UTF-8), strtype 1 = Unicode C-Style (UTF-16).
+        strings.setup(strtypes=[0, 1])
+        _strings_cache = [(s.ea, str(s)) for s in strings if s is not None]
     return _strings_cache
 
 
@@ -373,11 +386,26 @@ def _build_health_payload() -> dict:
     }
 
 
-@tool
 @idasync
+def _server_health_full() -> ServerHealthResult:
+    return _build_health_payload()
+
+
+@tool
 def server_health() -> ServerHealthResult:
     """Health/ready probe for MCP server and current IDB state."""
-    return _build_health_payload()
+    # Every field below needs the IDA main thread. Report the busy state
+    # rather than queueing behind the very call we are meant to observe.
+    busy = get_pump().busy_status()
+    if busy is not None:
+        return {
+            "status": "busy",
+            "uptime_sec": round(time.time() - _server_started_at, 3),
+            "busy_tool": busy["tool"],
+            "busy_sec": busy["elapsed_sec"],
+            "queued_calls": busy["queued"],
+        }
+    return _server_health_full()
 
 
 @idasync
@@ -835,43 +863,24 @@ def idb_save(
 ) -> IdbSaveResult:
     """Save active IDB to disk, optionally to a provided path.
 
-    In the GUI (idaq) the open database is backed by loose working files
-    (.id0/.id1/.id2/.nam/.til) that IDA actively manages; packing+killing them
-    out from under the running GUI corrupts the database on the next reopen
-    (issue #446). So in GUI mode this uses IDA's native in-place save
-    (equivalent to Ctrl+W / save_database(None, 0)), and for an explicit
-    different destination writes a compressed copy WITHOUT killing the live
-    working files.
-
-    Only headless idalib — which has no live loose files to clobber — packs into
-    a single compressed .i64/.idb, removing the loose working files.
+    The open database is backed by loose working files (.id0/.id1/.id2/.nam/.til)
+    that IDA actively manages, headless included. Killing them out from under the
+    open database corrupts it (issues #446, #498), so DBFL_KILL is never used
+    here: an in-place save uses IDA's native save (Ctrl+W), and an explicit
+    different destination gets a compressed copy while the working files stay.
     """
     try:
         save_path = path.strip() if path else ""
+        current = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
         if not save_path:
-            save_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
+            save_path = current
         if not save_path:
             return {"ok": False, "path": None, "error": "Could not resolve IDB path"}
 
-        try:
-            is_gui = bool(ida_kernwin.is_idaq())
-        except Exception:
-            is_gui = False
-
-        if is_gui:
-            # GUI: never DBFL_KILL the loose files of the open database.
-            current = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
-            if path and save_path != current:
-                # Save-as a compressed snapshot to a new path; leaves the live
-                # working files intact.
-                ok = bool(ida_loader.save_database(save_path, ida_loader.DBFL_COMP))
-            else:
-                # Native in-place save (Ctrl+W).
-                ok = bool(ida_loader.save_database(None, 0))
+        if save_path != current:
+            ok = bool(ida_loader.save_database(save_path, ida_loader.DBFL_COMP))
         else:
-            # Headless idalib: safe to pack into a single compressed file.
-            flags = ida_loader.DBFL_KILL | ida_loader.DBFL_COMP
-            ok = bool(ida_loader.save_database(save_path, flags))
+            ok = bool(ida_loader.save_database(None, 0))
 
         result: dict = {"ok": ok, "path": save_path}
         if not ok:

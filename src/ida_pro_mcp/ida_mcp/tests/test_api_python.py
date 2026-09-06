@@ -95,6 +95,70 @@ def test_py_eval_exception_goes_to_stderr():
 
 
 @test()
+def test_py_eval_persists_variables_and_imports():
+    """Variables and imported modules remain usable on the next call."""
+    first = py_eval("import math\nvalue = 81", new_locals=True)
+    assert first["stderr"] == ""
+    result = py_eval("math.isqrt(value)")
+    assert result["result"] == "9"
+    assert result["stderr"] == ""
+
+
+@test()
+def test_py_eval_persisted_callbacks_see_reassigned_globals():
+    """A callback from an earlier call reads the current global value."""
+    first = py_eval("value = 1\ndef callback():\n    return value", new_locals=True)
+    assert first["stderr"] == ""
+    result = py_eval("value = 42\ncallback()")
+    assert result["result"] == "42"
+    assert result["stderr"] == ""
+
+
+@test()
+def test_py_eval_comprehensions_share_globals():
+    """Comprehensions resolve names assigned in the same execution."""
+    result = py_eval("factor = 7\n[factor * n for n in range(3)]", new_locals=True)
+    assert result["result"] == "[0, 7, 14]"
+    assert result["stderr"] == ""
+
+
+@test()
+def test_py_eval_reset_clears_user_state_and_keeps_ida_helpers():
+    """Reset removes earlier definitions and restores the IDA context."""
+    first = py_eval("value = 7\ndef callback():\n    return value", new_locals=True)
+    assert first["stderr"] == ""
+    result = py_eval(
+        "('value' in globals(), 'callback' in globals(), "
+        "callable(compat.get_inf_structure), callable(idaapi.get_inf_structure))",
+        new_locals=True,
+    )
+    assert result["result"] == "(False, False, True, True)"
+    assert result["stderr"] == ""
+
+
+@test()
+def test_py_eval_preserves_stdout_and_assignments_before_exception():
+    """Failure returns earlier output and retains completed assignments."""
+    result = py_eval(
+        'value = 7\nprint("before failure")\nraise RuntimeError("boom")',
+        new_locals=True,
+    )
+    assert result["stdout"] == "before failure\n"
+    assert "RuntimeError: boom" in result["stderr"]
+    assert py_eval("value")["result"] == "7"
+
+
+@test()
+def test_py_eval_deleted_variables_stay_deleted():
+    """Deleting a persisted variable affects subsequent calls."""
+    assert py_eval("value = 7", new_locals=True)["stderr"] == ""
+    assert py_eval("del value")["stderr"] == ""
+    result = py_eval("'value' in globals()")
+    assert result["result"] == "False"
+    assert result["stderr"] == ""
+
+
+@test()
 def test_py_exec_file_runs_script_and_captures_stdout():
     """py_exec_file executes a script file and captures its stdout."""
     with _tmp_script('print("hello from file")\nresult = 42\n') as path:

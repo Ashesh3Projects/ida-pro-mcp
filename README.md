@@ -35,6 +35,7 @@ The binaries and prompt for the video are available in the [mcp-reversing-datase
   - [Warp](https://www.warp.dev/)
   - [Windsurf](https://windsurf.com)
   - [Zed](https://zed.dev/)
+  - [Kimi Code](https://moonshotai.github.io/kimi-code/en/)
   - [Other MCP Clients](https://modelcontextprotocol.io/clients#example-clients): Run `ida-pro-mcp --config` to get the JSON config for your client.
 
 **Note**: This requires having idalib activated globally and [uv](https://astral.sh/uv) installed:
@@ -44,6 +45,8 @@ The binaries and prompt for the video are available in the [mcp-reversing-datase
 uv run "C:\Program Files\IDA Professional 9.3\idalib\python\py-activate-idalib.py"
 # macos
 uv run "/Applications/IDA Professional 9.3.app/Contents/MacOS/idalib/python/py-activate-idalib.py"
+# linux
+uv run "/path/to/idapro-9.3/idalib/python/py-activate-idalib.py"
 ```
 
 ## Installation (Claude Code)
@@ -65,6 +68,19 @@ codex plugin marketplace add mrexodia/codex-marketplace
 codex plugin remove ida-pro-mcp@mrexodia
 codex plugin add ida-pro-mcp@mrexodia
 ```
+
+## Installation (Kimi Code)
+
+To install the latest IDA Pro MCP in Kimi Code, run this slash command in the chat:
+
+```
+/plugins install https://github.com/mrexodia/ida-pro-mcp/tree/main
+/reload
+```
+
+This installs the `idalib` MCP server and the `idapython` skill. Plugins are copied to
+`$KIMI_CODE_HOME/plugins/managed/`, so `uv` must be on your `PATH`. The first session after
+installing is slower, because `uv` resolves the dependencies before the server responds.
 
 ## Installation (GUI)
 
@@ -194,7 +210,7 @@ _Note_: The `idalib` feature was contributed by [Willi Ballenthin](https://githu
 
 ## Headless idalib Session Model
 
-`idalib-mcp` is a supervisor that keeps each open database in its own idalib worker process. Workers register themselves in a host-local discovery directory and outlive the supervisor that spawned them; any subsequent supervisor that wants the same path adopts the running worker. A worker self-exits when no request has hit it for its idle TTL (default 1 hour). There is no `idb_close` tool — clients that no longer care about a database simply stop using it, and only the user can close a GUI window.
+`idalib-mcp` is a supervisor that keeps each open database in its own idalib worker process. Workers register themselves in a host-local discovery directory and outlive the supervisor that spawned them; any subsequent supervisor that wants the same path adopts the running worker. A worker self-exits when no request has hit it for its idle TTL (default 1 hour). Call `idb_close` to release a worker eagerly (freeing a slot toward `--max-workers`), adopted GUI/worker instances are detached rather than killed.
 
 `idb_open` picks the backend via its `mode` parameter:
 
@@ -225,6 +241,7 @@ xrefs_to("ImportantExport", database="library")
 
 - `idb_open(input_path, mode="prefer_headless", run_auto_analysis=True, build_caches=True, init_hexrays=True, preferred_session_id="")`: Open a binary, warm up subsystems (strings cache, Hex-Rays), and return its session ID. If a worker or GUI for this path is already running on the host, that instance is adopted and `preferred_session_id` is ignored.
 - `idb_list()`: List open sessions and running GUI IDA instances. Each entry has `adopted` (True if this supervisor manages it, False for GUIs/workers discovered but not yet opened via `idb_open`), `backend` (`worker` or `gui`), `is_active`, and process IDs.
+- `idb_close(database, save=True)`: Save (optionally), unregister the session, and terminate its owned worker, freeing a slot toward `--max-workers`. Adopted GUI/worker instances are detached, not killed.
 - `idb_save(session_id, path="")`: Save a session's IDB to disk. Forwarded as a regular worker tool (`database=<id>` injected) — same signature in both backends.
 - Per-database health: call `server_health(database=<id>)` (forwarded). `idb_list()` reports `is_active` from the supervisor's TCP/RPC probe.
 
@@ -232,6 +249,13 @@ Worker controls:
 
 - `--max-workers N`: maximum simultaneous database workers (`0` = unlimited, default `4`).
 - `IDA_MCP_MAX_WORKERS`: environment default for `--max-workers`.
+
+The bundled Codex plugin forwards the runtime's `IDA_MCP_*` configuration variables from the Codex host environment:
+
+- Capacity and lifecycle: `IDA_MCP_MAX_WORKERS`, `IDA_MCP_OPEN_TIMEOUT`, `IDA_MCP_WEDGED_GRACE_SEC`, `IDA_MCP_WORKER_CALL_TIMEOUT`.
+- Health probes: `IDA_MCP_HEALTH_TCP_TIMEOUT`, `IDA_MCP_HEALTH_RPC_TIMEOUT`, `IDA_MCP_HEALTH_RETRIES`, `IDA_MCP_HEALTH_RETRY_BACKOFF`.
+- Worker behavior: `IDA_MCP_TOOL_TIMEOUT_SEC`, `IDA_MCP_ANALYSIS_PROMPT`, `IDA_MCP_URL`.
+- Request logging: `IDA_MCP_LOG_REQUESTS`, `IDA_MCP_LOG_SKIP_METHODS`.
 
 
 ## MCP Resources

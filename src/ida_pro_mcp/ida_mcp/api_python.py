@@ -109,6 +109,9 @@ class PythonExecResult(TypedDict):
     stderr: str
 
 
+_persisted_locals: dict = {}
+
+
 # ============================================================================
 # Python Evaluation
 # ============================================================================
@@ -119,12 +122,20 @@ class PythonExecResult(TypedDict):
 @unsafe
 def py_eval(
     code: Annotated[str, "Python code"],
+    new_locals: Annotated[
+        bool,
+        "False (default): reuse the namespace from previous py_eval calls, so variables assigned earlier remain visible. True: reset and start with a fresh namespace.",
+    ] = False,
 ) -> PythonExecResult:
     """Execute Python in IDA context and return result/stdout/stderr.
 
-    Statements and callbacks share one global namespace. On modern IDA, use
-    ida_ida.inf_get_* or the preloaded compat helpers instead of the removed
-    idaapi.get_inf_structure API.
+    Variables, imports, and definitions persist across calls by default.
+    Pass new_locals=True to reset the stored namespace and start fresh.
+    Statements and callbacks share that namespace, so earlier callbacks see
+    later assignments. A trailing expression is returned in "result".
+
+    On modern IDA, use ida_ida.inf_get_* or the preloaded compat helpers
+    instead of the removed idaapi.get_inf_structure API.
     """
     # Capture stdout/stderr
     stdout_capture = io.StringIO()
@@ -136,8 +147,15 @@ def py_eval(
         sys.stdout = stdout_capture
         sys.stderr = stderr_capture
 
-        exec_globals = _make_exec_globals()
-        initial_keys = set(exec_globals)
+        context = _make_exec_globals()
+        initial_keys = set(context)
+        if new_locals:
+            _persisted_locals.clear()
+        for key, value in context.items():
+            _persisted_locals.setdefault(key, value)
+        # Keep the dictionary itself stable: persisted functions retain it as
+        # their __globals__, including updates made by subsequent calls.
+        exec_globals = _persisted_locals
 
         result_value = None
 

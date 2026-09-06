@@ -30,6 +30,8 @@ from ..api_core import (
     server_warmup,
     find_regex,
     search_text,
+    idb_save,
+    invalidate_strings_cache,
 )
 
 
@@ -469,6 +471,21 @@ def test_find_regex():
     assert_has_keys(result, "matches", "cursor")
 
 
+@test()
+def test_find_regex_strings_cache_includes_wide_strings():
+    """Strings cache is built with UTF-16 (strtype 1) included (#263).
+
+    Smoke test: invalidate the cache, rebuild, and confirm find_regex still
+    returns a well-formed result. The cache setup now passes
+    ``strtypes=[0, 1]`` to ``idautils.Strings().setup()`` so wide-char strings
+    are scanned alongside ASCII. Verifying actual UTF-16 hits requires a binary
+    with known wide strings (e.g. a UE4/Windows binary).
+    """
+    invalidate_strings_cache()
+    result = find_regex(".*")
+    assert_has_keys(result, "matches", "cursor")
+
+
 # ============================================================================
 # Tests for search_text
 # ============================================================================
@@ -553,3 +570,25 @@ def test_search_text_regex_mode():
         skip_test("no call/jmp in binary")
     for h in result["hits"]:
         assert h["matches"]
+
+
+@test()
+def test_idb_save_keeps_working_files():
+    """Repeated saves must not delete the open database's working files (#498)."""
+    import os
+    import ida_loader
+
+    idb = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
+    base = os.path.splitext(idb)[0] if idb.lower().endswith((".i64", ".idb")) else idb
+    parts = [base + ext for ext in (".id0", ".id1", ".id2", ".nam", ".til")]
+    before = [p for p in parts if os.path.exists(p)]
+    if not before:
+        skip_test("no loose working files for this database")
+
+    for _ in range(2):
+        result = idb_save()
+        assert result["ok"], result.get("error")
+        missing = [p for p in before if not os.path.exists(p)]
+        assert not missing, f"save removed working files: {missing}"
+
+    assert_non_empty(list_funcs({"offset": 0, "count": 5})[0]["data"])

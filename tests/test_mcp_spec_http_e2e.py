@@ -1,10 +1,16 @@
 """End-to-end tests over a real localhost HTTP socket."""
+import gzip
+import http.client
+import json
+import socket
 
 import sys
 import pathlib
 import time
 import unittest
 from typing import Annotated, TypedDict
+import threading
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 
@@ -63,6 +69,20 @@ def _make_server() -> McpServer:
         return f"hello {name}"
 
     return srv
+
+def _raw_status(host: str, port: int, request: bytes) -> int:
+    connection = socket.create_connection((host, port), timeout=2)
+    try:
+        connection.sendall(request)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+        return int(response.split(b" ", 2)[1])
+    finally:
+        connection.close()
 
 
 class HttpE2EBootstrapTests(unittest.TestCase):
@@ -243,6 +263,252 @@ class HttpSessionManagementTests(unittest.TestCase):
         if session_id is not None:
             self.assertGreater(len(session_id), 0)
 
+    def test_notification_response_is_bodyless(self):
+        payload = json.dumps(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        ).encode("utf-8")
+        connection = http.client.HTTPConnection(
+            self.harness.host, self.harness.port, timeout=2
+        )
+        try:
+            connection.request(
+                "POST",
+                "/mcp",
+                body=payload,
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            body = response.read()
+        finally:
+            connection.close()
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(response.getheader("Content-Length"), "0")
+        self.assertEqual(body, b"")
+
+
+class Http11TransportTests(unittest.TestCase):
+    def test_rejects_missing_and_duplicate_host(self):
+        with McpHttpTestServer(_make_server()) as harness:
+            body = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
+            suffix = (
+                f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+            ).encode() + body
+            self.assertEqual(
+                _raw_status(
+                    harness.host,
+                    harness.port,
+                    b"POST /mcp HTTP/1.1\r\n" + suffix,
+                ),
+                400,
+            )
+            self.assertEqual(
+                _raw_status(
+                    harness.host,
+                    harness.port,
+                    (
+                        f"POST /mcp HTTP/1.1\r\nHost: {harness.host}:{harness.port}\r\n"
+                        "Host: evil.example\r\n"
+                    ).encode()
+                    + suffix,
+                ),
+                400,
+            )
+
+            self.assertEqual(
+                _raw_status(
+                    harness.host,
+                    harness.port,
+                    b"POST /mcp HTTP/1.0\r\n" + suffix,
+                ),
+                200,
+            )
+
+    def test_rejects_non_decimal_content_length(self):
+        with McpHttpTestServer(_make_server()) as harness:
+            body = b"abcde"
+            for value in ("+5", "-0"):
+                request = (
+                    f"POST /mcp HTTP/1.1\r\nHost: {harness.host}:{harness.port}\r\n"
+                    f"Content-Length: {value}\r\n\r\n"
+                ).encode() + body
+                self.assertEqual(_raw_status(harness.host, harness.port, request), 400)
+
+    def test_expect_rejects_invalid_framing_without_continue(self):
+        server = _make_server()
+        server.post_body_limit = 100
+        with McpHttpTestServer(server) as harness:
+            requests = (
+                (
+                    f"POST /mcp HTTP/1.1\r\nHost: {harness.host}:{harness.port}\r\n"
+                    "Content-Length: 101\r\nExpect: 100-continue\r\n\r\n"
+                ).encode(),
+                (
+                    f"POST /mcp HTTP/1.1\r\nHost: {harness.host}:{harness.port}\r\n"
+                    "Content-Length: 2\r\nTransfer-Encoding: chunked\r\n"
+                    "Expect: 100-continue\r\n\r\n"
+                ).encode(),
+            )
+            self.assertEqual(_raw_status(harness.host, harness.port, requests[0]), 413)
+            self.assertEqual(_raw_status(harness.host, harness.port, requests[1]), 400)
+
+    def test_rejects_malformed_chunk_trailer(self):
+        with McpHttpTestServer(_make_server()) as harness:
+            body = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
+            request = (
+                f"POST /mcp HTTP/1.1\r\nHost: {harness.host}:{harness.port}\r\n"
+                "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ).encode()
+            request += f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n \r\n\r\n"
+            self.assertEqual(_raw_status(harness.host, harness.port, request), 400)
+
+    def test_compressed_body_limit_and_malformed_stream(self):
+        server = _make_server()
+        server.post_body_limit = 100
+        with McpHttpTestServer(server) as harness:
+            connection = http.client.HTTPConnection(harness.host, harness.port, timeout=2)
+            try:
+                connection.request(
+                    "POST",
+                    "/mcp",
+                    body=gzip.compress(b"x" * 101),
+                    headers={"Content-Encoding": "gzip"},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 413)
+                response.read()
+            finally:
+                connection.close()
+
+            connection = http.client.HTTPConnection(harness.host, harness.port, timeout=2)
+            try:
+                connection.request(
+                    "POST",
+                    "/mcp",
+                    body=b"not gzip",
+                    headers={"Content-Encoding": "gzip"},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 400)
+                response.read()
+            finally:
+                connection.close()
+
+    def test_single_threaded_stop_closes_idle_keepalive_connection(self):
+        server = _make_server()
+        server.serve("127.0.0.1", 0, background=True, threaded=False)
+        port = server._http_server.server_address[1]
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        body = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
+        try:
+            connection.request(
+                "POST",
+                "/mcp",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+
+            stopper = threading.Thread(target=server.stop)
+            stopper.start()
+            stopper.join(timeout=2)
+            stopped_while_connection_open = not stopper.is_alive()
+            connection.close()
+            stopper.join(timeout=2)
+            self.assertTrue(stopped_while_connection_open)
+        finally:
+            connection.close()
+            server.stop()
+
+    def test_stop_closes_connection_accepted_during_shutdown(self):
+        accepted = threading.Event()
+        register = threading.Event()
+        shutdown_started = threading.Event()
+
+        class PausedRegistrationServer(McpServer):
+            def _register_http_connection(self, connection):
+                accepted.set()
+                if not register.wait(timeout=2):
+                    raise RuntimeError("Connection registration was not released")
+                super()._register_http_connection(connection)
+
+            def _shutdown_http_connections(self):
+                super()._shutdown_http_connections()
+                shutdown_started.set()
+
+        server = PausedRegistrationServer("stop-race")
+        server.serve("127.0.0.1", 0, background=True, threaded=False)
+        port = server._http_server.server_address[1]
+        connection = socket.create_connection(("127.0.0.1", port), timeout=2)
+        stopper = threading.Thread(target=server.stop)
+        try:
+            self.assertTrue(accepted.wait(timeout=2))
+            stopper.start()
+            self.assertTrue(shutdown_started.wait(timeout=2))
+            register.set()
+            stopper.join(timeout=2)
+            stopped_while_connection_open = not stopper.is_alive()
+            connection.close()
+            stopper.join(timeout=2)
+            self.assertTrue(stopped_while_connection_open)
+        finally:
+            register.set()
+            connection.close()
+            if stopper.ident is not None:
+                stopper.join(timeout=2)
+            server.stop()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows detaches sockets during stop")
+    def test_sse_stop_during_select_does_not_report_closed_socket_error(self):
+        select_entered = threading.Event()
+        resume_select = threading.Event()
+        sockets_closed = threading.Event()
+        errors = []
+        transport = sys.modules[McpServer.__module__]
+        real_select = transport.select.select
+
+        class ObservedShutdownServer(McpServer):
+            def _shutdown_http_connections(self):
+                super()._shutdown_http_connections()
+                sockets_closed.set()
+
+        def paused_select(*args):
+            select_entered.set()
+            if not resume_select.wait(timeout=2):
+                raise RuntimeError("SSE select was not released")
+            return real_select(*args)
+
+        server = ObservedShutdownServer("sse-stop-race")
+        server.serve("127.0.0.1", 0, background=True, threaded=False)
+        http_server = server._http_server
+        http_server.handle_error = lambda *_: errors.append(sys.exc_info()[1])
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", http_server.server_port, timeout=2
+        )
+        stopper = threading.Thread(target=server.stop)
+        try:
+            with patch.object(transport.select, "select", paused_select):
+                connection.request("GET", "/sse")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertTrue(select_entered.wait(timeout=2))
+                stopper.start()
+                self.assertTrue(sockets_closed.wait(timeout=2))
+                resume_select.set()
+                stopper.join(timeout=2)
+                self.assertFalse(stopper.is_alive())
+                self.assertEqual(errors, [])
+        finally:
+            resume_select.set()
+            connection.close()
+            if stopper.ident is not None:
+                stopper.join(timeout=2)
+            server.stop()
 
 if __name__ == "__main__":
     unittest.main()
