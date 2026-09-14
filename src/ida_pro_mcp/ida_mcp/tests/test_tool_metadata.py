@@ -1,6 +1,7 @@
 """Tests for high-signal MCP tool metadata."""
 
 import ast
+import importlib.util
 import re
 from pathlib import Path
 
@@ -97,6 +98,55 @@ def test_tool_param_descriptions_specific():
                 )
 
     assert not failures, "\n".join(failures)
+
+
+@test()
+def test_offline_catalog_matches_registered_tool_descriptors():
+    """Offline discovery must match every runtime signature and extension group."""
+    from ..http import ORIGINAL_TOOLS
+    from ..rpc import MCP_EXTENSIONS, MCP_SERVER
+
+    # Resolve beside this plugin source so GUI and idalib test runs compare the
+    # same checkout, even when another ida_pro_mcp editable install is on sys.path.
+    catalog_path = Path(__file__).resolve().parents[2] / "tool_catalog.py"
+    spec = importlib.util.spec_from_file_location(
+        "_ida_mcp_runtime_parity_catalog", catalog_path
+    )
+    assert spec is not None and spec.loader is not None, str(catalog_path)
+    catalog = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(catalog)
+
+    # ORIGINAL_TOOLS includes disabled tools. Inspect metadata directly without
+    # calling tools or changing the active IDB's registry or extension settings.
+    runtime = {
+        name: MCP_SERVER._generate_tool_schema(name, function)
+        for name, function in ORIGINAL_TOOLS.items()
+    }
+    assert runtime, "No runtime tools were registered for catalog comparison"
+    extension_selections = [set(MCP_EXTENSIONS), set()]
+    if len(MCP_EXTENSIONS) > 1:
+        extension_selections.extend({group} for group in MCP_EXTENSIONS)
+
+    for extensions in extension_selections:
+        listed = catalog.get_ida_tools(MCP_SERVER._generate_tool_schema, extensions)
+        offline = {descriptor["name"]: descriptor for descriptor in listed}
+        assert len(offline) == len(listed), "Offline catalog contains duplicate tools"
+        expected = {
+            name: descriptor
+            for name, descriptor in runtime.items()
+            if MCP_SERVER._get_tool_extension(name) is None
+            or MCP_SERVER._get_tool_extension(name) in extensions
+        }
+        missing = set(expected) - set(offline)
+        extra = set(offline) - set(expected)
+        assert not missing and not extra, (
+            f"Catalog names differ for extensions {sorted(extensions)}: "
+            f"missing={sorted(missing)}, extra={sorted(extra)}"
+        )
+        for name, descriptor in expected.items():
+            assert offline[name] == descriptor, (
+                f"Offline descriptor differs from the registered IDA tool: {name}"
+            )
 
 
 # Stdlib/primitive type names that are OK to appear in a union alongside a

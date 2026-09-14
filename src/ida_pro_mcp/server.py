@@ -12,6 +12,7 @@ from typing import Annotated, TYPE_CHECKING, TypedDict
 from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
+    from ida_pro_mcp.ida_mcp.discovery import discover_instances, probe_instance
     from ida_pro_mcp.ida_mcp.zeromcp import (
         EXTERNAL_BASE_HEADER,
         McpHttpRequestHandler,
@@ -28,6 +29,7 @@ else:
         get_current_request_external_base_url,
     )
     from zeromcp.jsonrpc import JsonRpcRequest, JsonRpcResponse
+    from discovery import discover_instances, probe_instance
 
     sys.path.pop(0)
 
@@ -47,15 +49,9 @@ except ImportError:
     )
 
 try:
-    from .ida_mcp.discovery import discover_instances, probe_instance
+    from .tool_catalog import get_ida_tools
 except ImportError:
-    try:
-        from ida_mcp.discovery import discover_instances, probe_instance
-    except ImportError:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ida_mcp"))
-        from discovery import discover_instances, probe_instance
-
-        sys.path.pop(0)
+    from tool_catalog import get_ida_tools
 
 DEFAULT_IDA_HOST = "127.0.0.1"
 DEFAULT_IDA_PORT = 13337
@@ -318,6 +314,22 @@ def _proxy_output_download(path: str) -> tuple[int, str, list[tuple[str, str]], 
         conn.close()
 
 
+def _proxy_tools_list(_meta: dict | None = None) -> dict:
+    local_tools = mcp._mcp_tools_list(_meta)["tools"]
+    installed_tools = get_ida_tools(
+        mcp._generate_tool_schema,
+        getattr(mcp._enabled_extensions, "data", set()),
+    )
+    local_names = {tool["name"] for tool in local_tools}
+    return {
+        "tools": [tool for tool in installed_tools if tool["name"] not in local_names]
+        + local_tools
+    }
+
+
+mcp.registry.methods["tools/list"] = _proxy_tools_list
+
+
 def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse | None:
     """Dispatch local instance tools and proxy all IDA operations."""
     if not isinstance(request, dict):
@@ -325,7 +337,7 @@ def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse |
     else:
         request_obj: JsonRpcRequest = request  # type: ignore
 
-    if request_obj["method"] == "initialize":
+    if request_obj["method"] in {"initialize", "ping", "tools/list"}:
         return dispatch_original(request)
     if request_obj["method"].startswith("notifications/"):
         return dispatch_original(request)
@@ -334,23 +346,6 @@ def dispatch_proxy(request: dict | str | bytes | bytearray) -> JsonRpcResponse |
         params = request_obj.get("params", {})
         if isinstance(params, dict) and params.get("name") in LOCAL_TOOLS:
             return dispatch_original(request)
-
-    if request_obj["method"] == "tools/list":
-        local_response = dispatch_original(request)
-        try:
-            remote_response = _proxy_to_ida(request)
-            local_result = local_response.get("result", {}) if local_response else {}
-            remote_result = remote_response.get("result", {}) if remote_response else {}
-            local_tools = local_result.get("tools", [])
-            remote_tools = remote_result.get("tools", [])
-            local_names = {tool.get("name") for tool in local_tools}
-            local_result["tools"] = [
-                tool for tool in remote_tools if tool.get("name") not in local_names
-            ] + local_tools
-        except Exception:
-            # Instance selection must remain usable even when the current target exits.
-            pass
-        return local_response
 
     try:
         return _proxy_to_ida(request)

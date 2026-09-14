@@ -101,6 +101,33 @@ ida-pro-mcp --install
 
 **Important**: Make sure you completely restart IDA and your MCP client for the installation to take effect. Some clients (like Claude) run in the background and need to be quit from the tray icon.
 
+### Start your MCP client before IDA
+
+For the GUI workflow, configure your client to launch the `ida-pro-mcp` proxy
+over **stdio**:
+
+```sh
+ida-pro-mcp --install codex,claude-code --transport stdio --scope global
+```
+
+The proxy advertises the installed tool catalog even when no IDA instance is
+running. Start IDA and its MCP plugin when you need to use a tool; the existing
+client connection can then make calls without refreshing its tool list. The
+`list_instances`, `select_instance`, and `instance_status` tools remain available
+to select a different instance. MCP pings also work while IDA is closed.
+
+This requires a proxy process independent of IDA. A client configured directly
+with `http://127.0.0.1:13337/mcp` connects to the GUI plugin, which is unavailable
+while IDA is closed. If you prefer HTTP, run the proxy separately on another port
+with `ida-pro-mcp --transport http://127.0.0.1:8744/mcp` and configure the client to
+use that URL.
+
+The catalog is generated from the installed Python tool signatures and cached
+for the proxy's lifetime. It preserves extension filtering (`?ext=dbg`), and IDA
+still enforces each database's enabled-tool settings when a tool is called.
+Restart the client or its MCP connection once after updating the package or
+switching its configuration; opening IDA later does not require another reload.
+
 ## Prompt Engineering
 
 LLMs are prone to hallucinations and you need to be specific with your prompting. For reverse engineering the conversion between integers and bytes are especially problematic. Below is a minimal example prompt, feel free to start a discussion or open an issue if you have good results with a different prompt:
