@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.0.1
+
+- Publish the unified MCP integration on main with matching package, GUI plugin, and client manifest versions.
+
 ## 3.0.0
 
 - Merge community upstream through c133c385, preserving the fork's history and custom behavior.

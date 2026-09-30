@@ -1,6 +1,6 @@
 [project]
 name = "ida-pro-mcp"
-version = "3.0.0"
+version = "3.0.1"
 description = "Typed IDA analysis with shared database sessions and official MCP integration"
 readme = "README.md"
 requires-python = ">=3.11"
