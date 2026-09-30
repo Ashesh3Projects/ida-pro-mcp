@@ -338,12 +338,52 @@ wheels = [
 ]
 
 [[package]]
-name = "ida-pro-mcp"
-version = "2.0.1"
-source = { editable = "." }
+name = "ida-domain"
+version = "0.5.1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idapro" },
+    { name = "packaging" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/80/34/be087d3ea1c3a6573e0660cb5b40f0c4ade9ae5772cf1c5d98d52472d28b/ida_domain-0.5.1.tar.gz", hash = "sha256:c49f2c417047d882e954f651b50a709a3f27903b33ba533b794aa54d6536d16f", size = 396413, upload-time = "2026-08-10T13:32:48.45Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/78/9c698d818b0fddc6648f703a0821edeeb65b18404b43f556d249c5446c96/ida_domain-0.5.1-py3-none-any.whl", hash = "sha256:bfbb17c7d0cb2ed7d3f21342e1c8787f9018d5c2a94cdfd29e06537dd026a06d", size = 201275, upload-time = "2026-08-10T13:32:46.955Z" },
+]
+
+[[package]]
+name = "ida-mcp"
+version = "20260929.0.1"
+source = { git = "https://github.com/HexRaysSA/ida-mcp?rev=cb2735f4ef8fbb31c666c411f4c8819ff42e25cb#cb2735f4ef8fbb31c666c411f4c8819ff42e25cb" }
+dependencies = [
+    { name = "ida-nexus" },
+    { name = "packaging" },
+    { name = "zeromcp" },
+]
+
+[[package]]
+name = "ida-nexus"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ida-domain" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/09/27/47787679ae5af7e1b441ac00f47622f01c4c768d5843345cdbb9f24e3bea/ida_nexus-0.13.0.tar.gz", hash = "sha256:2742b97b05ed1a4545ed5ea8119926b83ab676e0a1cdaf8b0aaba18ced98dac2", size = 186300, upload-time = "2026-09-23T13:41:38.111Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/47/e6/21b4bd9b252cd41195499a6e5f7fcc9c8db9c5f6aed52326b8e3152dad65/ida_nexus-0.13.0-py3-none-any.whl", hash = "sha256:a6566254f42b91e963417842d4147d858f669e5de50a7f145d3ad642483b1179", size = 104246, upload-time = "2026-09-23T13:41:39.371Z" },
+]
+
+[[package]]
+name = "ida-pro-mcp"
+version = "3.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "ida-domain" },
+    { name = "ida-mcp" },
+    { name = "ida-nexus" },
+    { name = "idapro" },
     { name = "tomli-w" },
+    { name = "zeromcp" },
 ]
 
 [package.dev-dependencies]
@@ -356,25 +396,29 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "idapro", specifier = ">=0.0.9" },
+    { name = "ida-domain", specifier = "==0.5.1" },
+    { name = "ida-mcp", git = "https://github.com/HexRaysSA/ida-mcp?rev=cb2735f4ef8fbb31c666c411f4c8819ff42e25cb" },
+    { name = "ida-nexus", specifier = "==0.13.0" },
+    { name = "idapro", specifier = ">=0.0.10" },
     { name = "tomli-w", specifier = ">=1.0.0" },
+    { name = "zeromcp", specifier = "==1.10.3" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "coverage", specifier = ">=7.13.4" },
     { name = "jsonschema", specifier = ">=4.0" },
-    { name = "mcp", specifier = ">=1.0" },
+    { name = "mcp", specifier = ">=1.0,<2" },
     { name = "pytest", specifier = ">=9.0.3" },
 ]
 
 [[package]]
 name = "idapro"
-version = "0.0.9"
+version = "0.0.10"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/8a/c9/7529ea6f5ecc7272342e85b3c7a8087646f347a9052b2e34eab71a3667bc/idapro-0.0.9.tar.gz", hash = "sha256:8a043a89ce507533e502e8f6581a4fb58bade25e8fa6049545b79ec636792e35", size = 986315, upload-time = "2026-05-12T15:03:50.068Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/75/249c605cc144a6b3778c48381d31ff9242f3e0b7ae23a9ca9c27224e641a/idapro-0.0.10.tar.gz", hash = "sha256:417c03c4605d18417e470f6a748e397b39d6d5829ebd3bbdedd92ff5b9092d11", size = 1060989, upload-time = "2026-07-15T12:55:22.313Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/d9/a455c08b162ec8b16eb9020eb96a6404c2cc4f87ba3b74b8401647b45fe1/idapro-0.0.9-py3-none-any.whl", hash = "sha256:9518ead4d84833a92e6085e9c8204e87ab4b3ae1800267d6c3dc579822311405", size = 2042736, upload-time = "2026-05-12T15:03:48.22Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/83/7b02832cc8b057f686cccdb771fe80282f801a9b798961f8070bb468c73c/idapro-0.0.10-py3-none-any.whl", hash = "sha256:43f227953a0e348ced21c050d277b7ce34103e2ce05fc739b7d8c186ef0e1542", size = 2194897, upload-time = "2026-07-15T12:55:20.88Z" },
 ]
 
 [[package]]
@@ -870,4 +914,12 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5e/da/6eee1ff8b6cbeed47eeb5229749168e81eb4b7b999a1a15a7176e51410c9/uvicorn-0.44.0.tar.gz", hash = "sha256:6c942071b68f07e178264b9152f1f16dfac5da85880c4ce06366a96d70d4f31e", size = 86947, upload-time = "2026-04-06T09:23:22.826Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/23/a5bbd9600dd607411fa644c06ff4951bec3a4d82c4b852374024359c19c0/uvicorn-0.44.0-py3-none-any.whl", hash = "sha256:ce937c99a2cc70279556967274414c087888e8cec9f9c94644dfca11bd3ced89", size = 69425, upload-time = "2026-04-06T09:23:21.524Z" },
+]
+[[package]]
+name = "zeromcp"
+version = "1.10.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/d4/8c08a915315542433db6e6f9fe28078412f0488c71648feb12fff43b8aa7/zeromcp-1.10.3.tar.gz", hash = "sha256:71231db2d132e3e02e3b10ae1cb48849aff6ef5abbde07ffd23d1071acacbae6", size = 106212, upload-time = "2026-09-23T13:06:39.377Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/a4/a4e551d50cf7c8070077ec84cf076fc920e31bfa35e6d7f6a297204cf8d3/zeromcp-1.10.3-py3-none-any.whl", hash = "sha256:a7e6bf9aa0d7e8b1235051e196e4297ae689ab9e4bc74e39e64b7217b8272fe7", size = 26753, upload-time = "2026-09-23T13:06:37.717Z" },
 ]

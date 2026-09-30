@@ -4,8 +4,11 @@ This file serves as the entry point for IDA Pro's plugin system.
 It loads the actual implementation from the ida_mcp package.
 """
 
+import json
 import sys
 import uuid
+from importlib.metadata import distribution
+from pathlib import Path
 import idaapi
 import ida_kernwin
 import ida_netnode
@@ -94,6 +97,51 @@ def unload_package(package_name: str):
 
 CONFIG_ACTION_ID = "mcp:configure"
 CONFIG_ACTION_LABEL = "MCP Configuration"
+
+
+def _configure_runtime_paths() -> None:
+    """Find the canonical fork and optional Nexus runtime from its installer."""
+    plugin_dir = Path(__file__).absolute().parent
+    manifest_path = plugin_dir / "ida-pro-mcp-runtime.json"
+    candidates = [plugin_dir, Path(__file__).resolve().parent.parent]
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("runtime manifest must be a JSON object")
+            package_root = manifest.get("package_root")
+            if isinstance(package_root, str):
+                candidates.append(Path(package_root))
+            # Do not mix binary modules built for another embedded Python ABI.
+            if manifest.get("python_version") == list(sys.version_info[:2]):
+                candidates.extend(Path(p) for p in manifest.get("site_packages", [])
+                                  if isinstance(p, str))
+        except (OSError, ValueError, TypeError) as error:
+            print(f"[MCP] Runtime manifest could not be read: {error}")
+    for candidate in reversed(candidates):
+        path = str(candidate)
+        if candidate.is_dir():
+            if path in sys.path:
+                sys.path.remove(path)
+            sys.path.insert(0, path)
+
+
+def _start_nexus():
+    """Share this GUI's database through the official Nexus runtime when available."""
+    _configure_runtime_paths()
+    try:
+        from ida_nexus import plugin
+    except ImportError:
+        return None
+    try:
+        package = distribution("ida-nexus")
+        expected_plugin = Path(package.locate_file("ida_nexus/plugin.py")).resolve()
+        if package.version != "0.13.0" or Path(plugin.__file__).resolve() != expected_plugin:
+            raise RuntimeError("IDA Nexus 0.13.0 from this installation is required; restart IDA after updating")
+        return plugin if plugin.init(owner="ida-pro-mcp") else None
+    except Exception as error:
+        print(f"[MCP] Nexus startup failed; legacy server remains available: {error}")
+        return None
 
 
 class MCPConfigForm(idaapi.Form):
@@ -225,6 +273,7 @@ class MCP(idaapi.plugin_t):
     DEFAULT_PORT = 13337
 
     def init(self):
+        self._nexus_plugin = _start_nexus()
         hotkey = MCP.wanted_hotkey.replace("-", "+")
         if __import__("sys").platform == "darwin":
             hotkey = hotkey.replace("Alt", "Option")
@@ -267,10 +316,7 @@ class MCP(idaapi.plugin_t):
         port = getattr(self, "_registered_port", None)
         if port is not None:
             try:
-                if TYPE_CHECKING:
-                    from .ida_mcp.discovery import unregister_instance
-                else:
-                    from ida_mcp.discovery import unregister_instance
+                from ida_pro_mcp.ida_mcp.discovery import unregister_instance
                 unregister_instance(port)
             except Exception as e:
                 print(f"[MCP] Instance unregistration failed: {e}")
@@ -287,12 +333,10 @@ class MCP(idaapi.plugin_t):
     def _start_server(self):
         """Start the server and register this IDA instance."""
 
-        # HACK: ensure fresh load of ida_mcp package
-        unload_package("ida_mcp")
-        if TYPE_CHECKING:
-            from .ida_mcp import MCP_SERVER, IdaMcpHttpRequestHandler
-        else:
-            from ida_mcp import MCP_SERVER, IdaMcpHttpRequestHandler
+        _configure_runtime_paths()
+        # Keep module identity stable while a Nexus bridge owns its registries.
+        # The official distribution also uses the top-level name ida_mcp.
+        from ida_pro_mcp.ida_mcp import MCP_SERVER, IdaMcpHttpRequestHandler
 
         port = self.port
         max_port = port + 100
@@ -314,10 +358,7 @@ class MCP(idaapi.plugin_t):
 
     def _register_instance(self, port: int):
         try:
-            if TYPE_CHECKING:
-                from .ida_mcp.discovery import register_instance
-            else:
-                from ida_mcp.discovery import register_instance
+            from ida_pro_mcp.ida_mcp.discovery import register_instance
             import os
             import idc
             import ida_nalt
@@ -358,6 +399,9 @@ class MCP(idaapi.plugin_t):
             self._ui_hooks.unhook()
         ida_kernwin.unregister_action(CONFIG_ACTION_ID)
         self._stop_server()
+        nexus = getattr(self, "_nexus_plugin", None)
+        if nexus is not None:
+            nexus.term()
 
 
 def PLUGIN_ENTRY():

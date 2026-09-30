@@ -1,11 +1,59 @@
 # IDA Pro MCP
 
-> [!IMPORTANT]
-> **I recommend using the [Official Hex-Rays IDA MCP Server](https://github.com/HexRaysSA/ida-mcp) instead!**
->
-> See the [announcement blog post](https://hex-rays.com/blog/hex-rays-ida-mcp-server) for more information.
+This fork combines the community project's typed analysis tools with the official Hex-Rays MCP server and IDA Nexus. Use one MCP entry point for decompilation, disassembly, xrefs, signatures, debugging, persistent Python, shared database sessions, API reference lookup, and session diagnostics.
 
-Simple [MCP Server](https://modelcontextprotocol.io/introduction) to allow vibe reversing in IDA Pro.
+**Quick start**
+
+Unified mode requires IDA 9.4+ with activated idalib and Python 3.11+. Keep the MCP client and IDA plugin on the same installation. Existing GUI/proxy and headless commands remain available through the legacy entry points below.
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install .
+.venv\Scripts\ida-pro-mcp install
+.venv\Scripts\ida-pro-mcp config --agent codex
+```
+
+If your package mirror has not published the pinned official dependencies, build the exact reviewed sources without changing your configured package index:
+
+```powershell
+.venv\Scripts\python scripts/bootstrap_unified.py --wheel-dir wheels --install
+```
+
+The bootstrap verifies Git revisions, builds dependency wheels, and writes a SHA-256 receipt. ZeroMCP's tagged source retains version 0.0.0; the helper applies the same metadata-only version step as its release workflow. The installed code remains the reviewed 1.10.3 revision.
+
+Add the JSON returned by `ida-pro-mcp config` to your MCP client. Or install a supported client directly with `ida-pro-mcp install codex --scope global`. The plugin installer exposes the current GUI database through Nexus and retains the existing legacy endpoint. Restart IDA after installing or upgrading the plugin.
+
+```console
+ida-pro-mcp stdio --agent codex
+ida-pro-mcp stdio --ext dbg
+ida-pro-mcp http --host 127.0.0.1 --port 8737
+ida-pro-mcp dashboard --open
+ida-pro-mcp logs --output support.zip
+```
+
+**Unified tools**
+
+The default catalog has 73 tools: 66 typed analysis tools, the official six tools (`open_database`, `execute_python`, `reference`, `list_databases`, `save_database`, `close_database`), and `read_output`. Use `--ext dbg` for all 22 debugger tools, yielding 95 tools. Discovery and reference lookup work before a database is open.
+
+Start with `open_database(path)`. Every typed tool accepts an optional `instance_id` returned by that call; omitting it uses the current target. Both tool families work on the same database. The existing IDA resources are also exposed, including optional `?instance_id=...` selection. Large typed outputs return a `read_output` continuation instead of an unauthenticated backend URL.
+
+Separate MCP processes hold separate Nexus leases and Python state. Closing one leaves peers attached. The official HTTP server uses one process-wide manager: separate HTTP sessions on the same server share its current target and state. Use explicit instance IDs and separate stdio processes when isolation matters. Database modifications and imported modules are shared, so Python namespaces are not sandboxes.
+
+`py_eval` retains its string result/stdout/stderr contract and callback persistence, with an isolated namespace per bridge client. `execute_python` uses its own Nexus namespace and returns JSON-compatible results. These two namespaces are separate. Unified leases remain active until `close_database` or client shutdown; timed idle release is disabled because typed bridge activity is outside Nexus's idle accounting.
+
+`--profile PATH` restricts advertised typed tools, while official lifecycle tools, `execute_python`, `reference`, and `read_output` remain available. Profiles are convenience filters, not read-only or security policies. Internal database and bridge services authenticate local requests; the outer MCP HTTP server does not add authentication. Keep it on loopback unless you supply an authenticated network boundary.
+
+**Compatibility and verification**
+
+- Legacy GUI proxy: `ida-pro-mcp legacy` or `ida-pro-mcp-legacy`. Existing flag-style commands such as `--ida-rpc`, `--install`, and `--config` retain their original routes.
+- Legacy headless supervisor: `idalib-mcp --stdio`, including explicit GUI/headless modes.
+- Legacy mode retains the advertised IDA 8.3+ floor; the new unified runtime requires 9.4+.
+- Run offline tests with `python -m pytest`. Run IDA tests separately with `ida-mcp-test <copied-fixture>`.
+- Official dependency pins: ida-mcp 20260929.0.1, ida-nexus 0.13.0, ida-domain 0.5.1, ZeroMCP 1.10.3. See [CHANGELOG](CHANGELOG.md) and [implementation design](docs/superpowers/specs/2026-09-30-unified-ida-mcp-design.md).
+
+The remaining documentation describes the inherited legacy workflows and typed APIs.
+
+
 
 https://github.com/user-attachments/assets/6ebeaa92-a9db-43fa-b756-eececce2aca0
 

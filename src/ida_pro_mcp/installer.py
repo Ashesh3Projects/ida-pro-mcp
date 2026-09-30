@@ -452,6 +452,9 @@ def install_mcp_servers(
 
 
 def _get_ida_user_dir() -> str:
+    idausr = os.environ.get("IDAUSR", "").split(os.pathsep)[0].strip()
+    if idausr:
+        return os.path.abspath(os.path.expanduser(idausr))
     if sys.platform == "win32":
         return os.path.join(os.environ["APPDATA"], "Hex-Rays", "IDA Pro")
     return os.path.join(os.path.expanduser("~"), ".idapro")
@@ -503,6 +506,8 @@ def install_ida_plugin(
     ida_plugin_folder = os.path.join(ida_folder, "plugins")
     loader_destination = os.path.join(ida_plugin_folder, "ida_mcp.py")
     pkg_destination = os.path.join(ida_plugin_folder, "ida_mcp")
+    canonical_destination = os.path.join(ida_plugin_folder, "ida_pro_mcp")
+    runtime_manifest = os.path.join(ida_plugin_folder, "ida-pro-mcp-runtime.json")
     old_plugin = os.path.join(ida_plugin_folder, "mcp-plugin.py")
 
     if uninstall:
@@ -510,6 +515,8 @@ def install_ida_plugin(
         for label, path in (
             ("loader", loader_destination),
             ("package", pkg_destination),
+            ("canonical package", canonical_destination),
+            ("runtime manifest", runtime_manifest),
             ("old plugin", old_plugin),
         ):
             if os.path.lexists(path):
@@ -536,6 +543,29 @@ def install_ida_plugin(
         installed_items.append(f"loader: {loader_destination}")
     if _install_link_or_copy(IDA_PLUGIN_PKG, pkg_destination):
         installed_items.append(f"package: {pkg_destination}")
+    if _install_link_or_copy(SCRIPT_DIR, canonical_destination):
+        installed_items.append(f"canonical package: {canonical_destination}")
+    # The GUI may use a different Python installation from the MCP client.
+    # Record only package locations, never credentials or user environment.
+    import sysconfig
+    manifest = {
+        "python": sys.executable,
+        "python_version": list(sys.version_info[:2]),
+        "package_root": os.path.dirname(SCRIPT_DIR),
+        "site_packages": list(dict.fromkeys(
+            sysconfig.get_path(name) for name in ("purelib", "platlib")
+            if sysconfig.get_path(name)
+        )),
+    }
+    manifest_text = json.dumps(manifest, indent=2) + "\n"
+    old_manifest = None
+    if os.path.isfile(runtime_manifest):
+        with open(runtime_manifest, encoding="utf-8") as stream:
+            old_manifest = stream.read()
+    if old_manifest != manifest_text:
+        with open(runtime_manifest, "w", encoding="utf-8") as stream:
+            stream.write(manifest_text)
+        installed_items.append(f"runtime manifest: {runtime_manifest}")
 
     if not quiet:
         if installed_items or removed_old_plugin:

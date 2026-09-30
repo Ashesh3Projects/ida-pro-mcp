@@ -23,6 +23,8 @@ import os
 
 from .rpc import tool, unsafe
 from .sync import idasync
+from .execution_context import get_python_namespace
+from .zeromcp.jsonrpc import RequestCancelledError
 from .utils import parse_address, get_function
 from . import compat
 
@@ -149,13 +151,13 @@ def py_eval(
 
         context = _make_exec_globals()
         initial_keys = set(context)
+        exec_globals = get_python_namespace(_persisted_locals)
         if new_locals:
-            _persisted_locals.clear()
+            exec_globals.clear()
         for key, value in context.items():
-            _persisted_locals.setdefault(key, value)
+            exec_globals.setdefault(key, value)
         # Keep the dictionary itself stable: persisted functions retain it as
         # their __globals__, including updates made by subsequent calls.
-        exec_globals = _persisted_locals
 
         result_value = None
 
@@ -214,6 +216,8 @@ def py_eval(
             "stderr": stderr_text,
         }
 
+    except RequestCancelledError:
+        raise
     except Exception:
         import traceback
 
@@ -274,6 +278,8 @@ def py_exec_file(
             "stderr": stderr_text,
         }
 
+    except RequestCancelledError:
+        raise
     except Exception:
         import traceback
 

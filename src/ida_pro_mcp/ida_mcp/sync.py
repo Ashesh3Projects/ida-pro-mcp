@@ -5,10 +5,12 @@ import os
 import sys
 import threading
 import time
+from contextvars import copy_context
 import idaapi
 import ida_kernwin
 import idc
 from .mainthread import PumpBusyError, get_pump
+from .execution_context import get_bridge_cancel_event
 from .rpc import McpToolError
 from .zeromcp.jsonrpc import get_current_cancel_event, RequestCancelledError
 
@@ -48,7 +50,7 @@ _PUMP_WAIT_SLACK_SEC = 30.0
 
 # Thread-local: while a synchronized tool body is running, holds the monotonic
 # deadline (or None if no timeout). Tools can read this to self-monitor and
-# return partial results gracefully — useful when sync.py's Timer-fired
+# return partial results gracefully — useful when sync.py's watcher-fired
 # set_cancelled mechanism races with GIL contention on tight loops.
 _deadline_state = threading.local()
 
@@ -132,31 +134,36 @@ def _sync_wrapper(ff, keep_batch=False):
 
         call_stack.put((ff.__name__))
         # Enable batch mode for all synchronized operations
-        old_batch = idc.batch(1)
+        old_batch = None
         prev_pre_call = getattr(_sync_state, "pre_call_batch", None)
-        _sync_state.pre_call_batch = old_batch
         completed = False
         try:
-            res_container.put(ff())
-            completed = True
-        except Exception as x:
-            res_container.put(x)
-        finally:
-            if not (completed and keep_batch):
-                idc.batch(old_batch)
-            _sync_state.pre_call_batch = prev_pre_call
-            # Non-blocking: a reentrant @idasync invoked synchronously
-            # inside ff() may have already popped our entry. Default
-            # block=True would freeze the IDA main thread on an empty
-            # queue and hang every subsequent @idasync call.
             try:
-                call_stack.get_nowait()
-            except queue.Empty:
-                pass
+                old_batch = idc.batch(1)
+                _sync_state.pre_call_batch = old_batch
+                result = ff()
+                completed = True
+            finally:
+                try:
+                    if old_batch is not None and not (completed and keep_batch):
+                        idc.batch(old_batch)
+                finally:
+                    _sync_state.pre_call_batch = prev_pre_call
+                    # A reentrant call may already have removed our entry.
+                    try:
+                        call_stack.get_nowait()
+                    except queue.Empty:
+                        pass
+        except BaseException as x:
+            # IDA discards exceptions escaping execute_sync callbacks. Ferry
+            # even SystemExit/KeyboardInterrupt and batch failures to the caller.
+            res_container.put(x)
+        else:
+            res_container.put(result)
 
     idaapi.execute_sync(runned, idaapi.MFF_WRITE)
     res = res_container.get()
-    if isinstance(res, Exception):
+    if isinstance(res, BaseException):
         raise res
     return res
 
@@ -186,7 +193,7 @@ def sync_wrapper(
     pump rather than the requesting thread, where the thread-local is absent.
     """
     if cancel_event is None:
-        cancel_event = get_current_cancel_event()
+        cancel_event = get_bridge_cancel_event() or get_current_cancel_event()
 
     timeout = timeout_override
     if timeout is None:
@@ -194,31 +201,71 @@ def sync_wrapper(
     if timeout > 0 or cancel_event is not None:
 
         def timed_ff():
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("Request was cancelled")
             # Calculate deadline when execution starts on IDA main thread,
             # not when the request was queued (avoids stale deadlines)
             deadline = time.monotonic() + timeout if timeout > 0 else None
 
-            # Native cancellation: clear any stale flag and schedule a
-            # set_cancelled() at the deadline. Many IDA SDK calls
+            # Native cancellation must observe both the deadline and explicit
+            # cancellation while Python is blocked inside an IDA SDK call.
+            # Many IDA SDK calls
             # (ida_search.find_*, ida_bytes.find_bytes/bin_search,
             # ida_hexrays.decompile*, ida_strlist.build_strlist,
             # ida_auto.auto_wait) poll user_cancelled() and bail with
             # BADADDR / MERR_CANCELED within one poll cycle, freeing the
             # main thread instead of running to natural completion.
-            # set_cancelled() is THREAD_SAFE so firing it from a Timer
-            # thread is safe.
             ida_kernwin.clr_cancelled()
             cancel_fired_at: list[float | None] = [None]
-            native_timer: threading.Timer | None = None
-            if deadline is not None:
-                def _fire_native_cancel():
-                    cancel_fired_at[0] = time.monotonic()
-                    ida_kernwin.set_cancelled()
-                native_timer = threading.Timer(timeout, _fire_native_cancel)
-                native_timer.daemon = True
-                native_timer.start()
+            native_stop = threading.Event()
+            native_lock = threading.Lock()
+            native_active = True
+            # idalib's compatibility shim also reports is_idaq(); Nexus uses
+            # this second check to distinguish a real interactive GUI.
+            native_gui = (
+                os.environ.get("IDA_IS_INTERACTIVE") == "1"
+                and getattr(ida_kernwin, "is_idaq", lambda: False)()
+            )
+
+            def cancel_native():
+                with native_lock:
+                    # GUI callbacks may run after the original request ended.
+                    # This per-operation guard cannot match a successor.
+                    if native_active:
+                        ida_kernwin.set_cancelled()
+                return 1
+
+            def watch_native_cancel():
+                while not native_stop.is_set():
+                    now = time.monotonic()
+                    explicit = cancel_event is not None and cancel_event.is_set()
+                    expired = deadline is not None and now >= deadline
+                    if explicit or expired:
+                        if expired:
+                            cancel_fired_at[0] = now
+                        if native_gui:
+                            # GUI set_cancelled marshals to the main thread;
+                            # waiting from a watcher that cleanup joins would
+                            # deadlock. Queue it without waiting (Nexus model).
+                            ida_kernwin.execute_sync(
+                                cancel_native,
+                                ida_kernwin.MFF_FAST | ida_kernwin.MFF_NOWAIT,
+                            )
+                        else:
+                            cancel_native()
+                        return
+                    delay = min(0.01, max(0, deadline - now)) if deadline else 0.01
+                    native_stop.wait(delay)
+
+            native_watcher = threading.Thread(
+                target=watch_native_cancel, name="ida-mcp-native-cancel", daemon=True
+            )
+            native_watcher.start()
+            monitoring = True
 
             def profilefunc(frame, event, arg):
+                if not monitoring:
+                    return
                 # Check request-level cancellation first (higher priority)
                 if cancel_event is not None and cancel_event.is_set():
                     raise CancelledError("Request was cancelled")
@@ -233,16 +280,19 @@ def sync_wrapper(
                     raise IDASyncError(f"Tool timed out after {timeout:.2f}s")
 
             # Expose the deadline so tool bodies can self-monitor and
-            # return partial results gracefully (independent of the Timer).
+            # return partial results gracefully (independent of the watcher).
             _deadline_state.deadline = deadline
             old_profile = sys.getprofile()
-            sys.setprofile(profilefunc)
             try:
+                sys.setprofile(profilefunc)
                 return ff()
             finally:
+                monitoring = False
                 sys.setprofile(old_profile)
-                if native_timer is not None:
-                    native_timer.cancel()
+                native_stop.set()
+                with native_lock:
+                    native_active = False
+                native_watcher.join()
                 # Sticky flag: clear unconditionally so the next tool starts
                 # with a clean state. Without this, every subsequent
                 # user_cancelled() returns True forever.
@@ -265,8 +315,12 @@ def idasync(f):
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
-        ff = functools.partial(f, *args, **kwargs)
+        # Capture on the requesting thread before either execute_sync or the
+        # legacy headless pump hands work off to IDA's main thread.
+        context = copy_context()
+        ff = functools.partial(context.run, f, *args, **kwargs)
         ff.__name__ = f.__name__
+        cancel_event = get_bridge_cancel_event() or get_current_cancel_event()
         timeout_override = _normalize_timeout(
             getattr(f, "__ida_mcp_timeout_sec__", None)
         )
@@ -274,11 +328,10 @@ def idasync(f):
 
         pump = get_pump()
         if not pump.active or pump.on_main_thread():
-            return sync_wrapper(ff, timeout_override, keep_batch=keep_batch)
+            return sync_wrapper(ff, timeout_override, keep_batch=keep_batch, cancel_event=cancel_event)
 
         # Headless: IDA only runs on the pump thread, so hand the whole
         # synchronized body over and wait for it there.
-        cancel_event = get_current_cancel_event()
         timeout = timeout_override
         if timeout is None:
             timeout = _get_tool_timeout_seconds()

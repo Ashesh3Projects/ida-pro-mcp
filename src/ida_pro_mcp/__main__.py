@@ -1,6 +1,6 @@
 import sys
-from ida_pro_mcp.server import main
+from ida_pro_mcp.cli import main
 
 if __name__ == "__main__":
     sys.argv[0] = "ida_pro_mcp"
-    main()
+    raise SystemExit(main())

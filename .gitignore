@@ -33,6 +33,8 @@ htmlcov/
 scalene-profile.json
 .omp/
 .pytest_cache/
+.pytest-tmp-*/
+.pytest-review-*/
 
 # MCP config
 .mcp.json

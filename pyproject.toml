@@ -1,7 +1,7 @@
 [project]
 name = "ida-pro-mcp"
-version = "2.0.1"
-description = "Vibe reversing with IDA Pro"
+version = "3.0.0"
+description = "Typed IDA analysis with shared database sessions and official MCP integration"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -19,34 +19,45 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
 ]
 dependencies = [
-    "idapro>=0.0.9",
+    "idapro>=0.0.10",
     "tomli-w>=1.0.0",
+    "ida-mcp==20260929.0.1",
+    "ida-nexus==0.13.0",
+    "ida-domain==0.5.1",
+    "zeromcp==1.10.3",
 ]
 
 [dependency-groups]
 dev = [
     "coverage>=7.13.4",
     "jsonschema>=4.0",
-    "mcp>=1.0",
+    "mcp>=1.0,<2",
     "pytest>=9.0.3",
 ]
 
 [project.urls]
-Repository = "https://github.com/mrexodia/ida-pro-mcp"
-Issues = "https://github.com/mrexodia/ida-pro-mcp/issues"
+Repository = "https://github.com/ashesh3projects/ida-pro-mcp"
+Issues = "https://github.com/ashesh3projects/ida-pro-mcp/issues"
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-ida-pro-mcp = "ida_pro_mcp.server:main"
+ida-pro-mcp = "ida_pro_mcp.cli:main"
+ida-pro-mcp-legacy = "ida_pro_mcp.server:main"
 idalib-mcp = "ida_pro_mcp.idalib_supervisor:main"
 ida-mcp-test = "ida_pro_mcp.test:main"
 ida-mcp-trace-dump = "ida_pro_mcp.trace_dump:main"
 
 [tool.pyright]
 include = ["src/ida_pro_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+ida-mcp = { git = "https://github.com/HexRaysSA/ida-mcp", rev = "cb2735f4ef8fbb31c666c411f4c8819ff42e25cb" }
 
 [tool.ruff]
 exclude = ["src/ida_pro_mcp/ida_mcp/zeromcp/*.py"]

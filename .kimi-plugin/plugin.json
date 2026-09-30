@@ -1,12 +1,12 @@
 {
   "name": "ida-pro-mcp",
-  "version": "0.1.0",
+  "version": "3.0.0",
   "description": "AI-powered reverse engineering assistant that bridges IDA Pro with language models through MCP.",
   "author": {
-    "name": "mrexodia",
-    "url": "https://github.com/mrexodia/ida-pro-mcp"
+    "name": "Ashesh3",
+    "url": "https://github.com/ashesh3projects"
   },
-  "homepage": "https://github.com/mrexodia/ida-pro-mcp",
+  "homepage": "https://github.com/ashesh3projects/ida-pro-mcp",
   "license": "MIT",
   "keywords": [
     "ida",
@@ -18,17 +18,19 @@
     "displayName": "IDA Pro MCP",
     "shortDescription": "AI-powered reverse engineering assistant that bridges IDA Pro with language models through MCP.",
     "longDescription": "AI-powered reverse engineering assistant that bridges IDA Pro with language models through MCP.",
-    "developerName": "mrexodia",
-    "websiteURL": "https://github.com/mrexodia/ida-pro-mcp"
+    "developerName": "Ashesh3",
+    "websiteURL": "https://github.com/ashesh3projects/ida-pro-mcp"
   },
   "skills": "./skills/",
   "mcpServers": {
-    "idalib": {
+    "ida-pro-mcp": {
       "command": "uv",
       "args": [
         "run",
-        "idalib-mcp",
-        "--stdio"
+        "ida-pro-mcp",
+        "stdio",
+        "--agent",
+        "kimi"
       ],
       "cwd": "./"
     }
