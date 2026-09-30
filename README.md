@@ -1,5 +1,10 @@
 # IDA Pro MCP
 
+> [!IMPORTANT]
+> **I recommend using the [Official Hex-Rays IDA MCP Server](https://github.com/HexRaysSA/ida-mcp) instead!**
+>
+> See the [announcement blog post](https://hex-rays.com/blog/hex-rays-ida-mcp-server) for more information.
+
 Simple [MCP Server](https://modelcontextprotocol.io/introduction) to allow vibe reversing in IDA Pro.
 
 https://github.com/user-attachments/assets/6ebeaa92-a9db-43fa-b756-eececce2aca0
@@ -15,7 +20,7 @@ The binaries and prompt for the video are available in the [mcp-reversing-datase
   - [Amazon Q Developer CLI](https://aws.amazon.com/q/developer/)
   - [Augment Code](https://www.augmentcode.com/)
   - [Claude](https://claude.ai/download)
-  - [Claude Code](https://www.anthropic.com/code)
+  - [Claude Code](https://claude.com/product/claude-code)
   - [Cline](https://cline.bot)
   - [Codex](https://github.com/openai/codex)
   - [Copilot CLI](https://docs.github.com/en/copilot)
