@@ -11,4 +11,3 @@
 - Add a single CLI, unified client manifests, reproducible pinned-source dependency bootstrap and regression/fixture acceptance tests.
 
 The unified runtime requires IDA 9.4+. Profiles filter typed tools; they do not constrain arbitrary Python. Separate HTTP sessions in one server share its DatabaseManager. Timed idle release is disabled for unified typed execution. Existing legacy entry points remain available.
-
