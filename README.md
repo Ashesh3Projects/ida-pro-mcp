@@ -279,6 +279,13 @@ For stdio-based clients, use:
 uv run idalib-mcp --stdio
 ```
 
+The legacy headless supervisor (`idalib-mcp`) and direct worker
+(`python -m ida_pro_mcp.idalib_server`) enable unsafe tools, including `py_eval`
+and `py_exec_file`, by default. Pass `--no-unsafe` to either command to disable
+them; explicit `--unsafe` is still accepted. The supervisor forwards this choice
+to workers it starts. Already running or adopted instances keep their original
+settings, and tool profiles and debugger extension filtering still apply.
+
 Database workers are persistent: each one runs as a detached process that
 outlives the supervisor that spawned it. When a new supervisor (over stdio
 or HTTP) calls `idb_open` for a binary that is already open under a worker

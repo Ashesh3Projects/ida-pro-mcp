@@ -1478,7 +1478,12 @@ def main() -> None:
     parser.add_argument("--stdio", action="store_true", help="Serve MCP over stdio instead of HTTP")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="HTTP host, default: 127.0.0.1")
     parser.add_argument("--port", type=int, default=8745, help="HTTP port, default: 8745")
-    parser.add_argument("--unsafe", action="store_true", help="Enable unsafe worker tools (DANGEROUS)")
+    parser.add_argument(
+        "--unsafe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable unsafe worker tools (default: enabled; --no-unsafe disables)",
+    )
     parser.add_argument(
         "--profile",
         type=Path,
@@ -1500,8 +1505,7 @@ def main() -> None:
     worker_args: list[str] = []
     if args.verbose:
         worker_args.append("--verbose")
-    if args.unsafe:
-        worker_args.append("--unsafe")
+    worker_args.append("--unsafe" if args.unsafe else "--no-unsafe")
     if args.profile is not None:
         worker_args.extend(["--profile", str(args.profile)])
 

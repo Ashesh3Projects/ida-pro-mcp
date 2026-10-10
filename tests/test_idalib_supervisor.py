@@ -131,6 +131,41 @@ def test_supervisor_import_does_not_import_ida_modules():
     assert "idaapi" not in sys.modules
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected_flag"),
+    [
+        ([], "--unsafe"),
+        (["--unsafe"], "--unsafe"),
+        (["--no-unsafe"], "--no-unsafe"),
+    ],
+)
+def test_cli_forwards_unsafe_choice_to_spawned_worker(monkeypatch, flags, expected_flag):
+    commands = []
+
+    def start_process(command, **kwargs):
+        commands.append(command)
+        return _FakeProcess()
+
+    server = supmod.McpServer("test")
+    monkeypatch.setattr(supmod, "mcp", server)
+    monkeypatch.setattr(supmod, "supervisor", None)
+    monkeypatch.setattr(sys, "argv", ["idalib-mcp", "--stdio", *flags])
+    monkeypatch.setattr(supmod.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(supmod.subprocess, "Popen", start_process)
+    monkeypatch.setattr(
+        supmod.IdalibSupervisor, "_wait_worker_ready", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        server, "stdio", lambda: supmod.supervisor._schema_or_idle_worker()
+    )
+
+    supmod.main()
+
+    assert len(commands) == 1
+    assert commands[0][1:3] == ["-m", "ida_pro_mcp.idalib_server"]
+    assert commands[0][7:] == [expected_flag]
+
+
 def test_worker_rpc_default_has_no_socket_timeout(monkeypatch):
     class _FakeResponse:
         status = 200

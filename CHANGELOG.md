@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Enable unsafe tools, including `py_eval` and `py_exec_file`, by default in the legacy headless worker and supervisor. Add `--no-unsafe` to disable them and forward that choice to newly spawned workers.
+
 ## 3.0.1
 
 - Publish the unified MCP integration on main with matching package, GUI plugin, and client manifest versions.

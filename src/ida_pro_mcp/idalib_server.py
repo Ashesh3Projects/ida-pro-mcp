@@ -205,7 +205,10 @@ def main():
         "--port", type=int, default=8745, help="Port to listen on, default: 8745"
     )
     parser.add_argument(
-        "--unsafe", action="store_true", help="Enable unsafe functions (DANGEROUS)"
+        "--unsafe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable unsafe functions (default: enabled; --no-unsafe disables)",
     )
     parser.add_argument(
         "--profile",
