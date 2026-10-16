@@ -42,10 +42,9 @@ def _diagnostic(command: str, arguments: list[str]) -> int:
 
 
 def _configure_unified(*, extensions: set[str], profile: str | None):
-    from ida_pro_mcp.unified_server import configure_server, manager_options
+    from ida_pro_mcp.unified_server import UnifiedHost
 
-    adapter = configure_server(extensions=extensions, profile=profile)
-    return adapter, manager_options(adapter)
+    return UnifiedHost(extensions=extensions, profile=profile), {}
 
 
 def _idle_timeout(value: str) -> float | None:

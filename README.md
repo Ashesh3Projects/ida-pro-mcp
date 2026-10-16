@@ -1,10 +1,10 @@
 # IDA Pro MCP
 
-This fork combines the community project's typed analysis tools with the official Hex-Rays MCP server and IDA Nexus. Use one MCP entry point for decompilation, disassembly, xrefs, signatures, debugging, persistent Python, shared database sessions, API reference lookup, and session diagnostics.
+This fork combines the community project's typed analysis tools with a FastMCP frontend and IDA Nexus database services. Use one MCP entry point for decompilation, disassembly, xrefs, signatures, debugging, persistent Python, shared database sessions, API reference lookup, and session diagnostics.
 
 **Quick start**
 
-Unified mode requires IDA 9.4+ with activated idalib and Python 3.11+. Keep the MCP client and IDA plugin on the same installation. Existing GUI/proxy and headless commands remain available through the legacy entry points below.
+Unified mode requires IDA 9.4+ with activated idalib and Python 3.11+. Keep the MCP client and IDA plugin on the same installation. Existing GUI/proxy and headless commands remain available with the same required-ID contract.
 
 ```powershell
 python -m venv .venv
@@ -33,11 +33,25 @@ ida-pro-mcp logs --output support.zip
 
 **Unified tools**
 
-The default catalog has 73 tools: 66 typed analysis tools, the official six tools (`open_database`, `execute_python`, `reference`, `list_databases`, `save_database`, `close_database`), and `read_output`. Use `--ext dbg` for all 22 debugger tools, yielding 95 tools. Discovery and reference lookup work before a database is open.
+The default catalog has 75 tools: 66 typed analysis tools plus discovery, lifecycle, Python, reference and output tools. Use `--ext dbg` for all 22 debugger tools, yielding 97 tools. Discovery and reference lookup work before a database is open.
 
-Start with `open_database(path)`. Every typed tool accepts an optional `instance_id` returned by that call; omitting it uses the current target. Both tool families work on the same database. The existing IDA resources are also exposed, including optional `?instance_id=...` selection. Large typed outputs return a `read_output` continuation instead of an unauthenticated backend URL.
+Call `list_instances()` for running databases or `open_database(path)` to open a file. Every database operation requires the exact `instance_id` returned by this MCP server, including both Python tools, debugger tools, save/close, status and `read_output`. IDs are random 16-character handles. There is no selected database and no `select_instance` tool.
 
-Separate MCP processes hold separate Nexus leases and Python state. Closing one leaves peers attached. The official HTTP server uses one process-wide manager: separate HTTP sessions on the same server share its current target and state. Use explicit instance IDs and separate stdio processes when isolation matters. Database modifications and imported modules are shared, so Python namespaces are not sandboxes.
+```python
+# Keep these returned values; do not invent IDs.
+a = open_database(path="C:/samples/file-a.exe")["instance_id"]
+b = open_database(path="C:/samples/file-b.exe")["instance_id"]
+decompile(instance_id=a, addr="main")
+xrefs_to(instance_id=b, addrs="ImportantExport")
+```
+
+Agents sharing one stdio or HTTP connection may submit these calls concurrently. Each database has its own queue; different IDA processes can progress independently. Closing/replacing a database retires the old ID. A stale ID fails and never follows a new file at the same path, PID, port or list position. Restarting the frontend creates a new ID namespace, so rediscover after reconnecting.
+
+Database resources require an identity-bearing URI such as `ida://idb/metadata?instance_id=<returned-id>`. Large results return a continuation: `read_output(instance_id=<returned-id>, output_id=<returned-output-id>, offset=0)`. Both IDs are required, and a closed binding expires its outputs.
+
+FastMCP 4.1 and MCP SDK 2.3 support the modern `2026-07-28` sessionless protocol and older clients through automatic negotiation. Modern HTTP uses per-request streams without a session ID; older HTTP clients retain transport sessions for cancellation. Neither stores database selection. Keep `json_response=False` and normal legacy session handling; forcing legacy `stateless_http=True` loses cancellation. Use one frontend process per configured service; multiple ASGI workers need separate shared lease coordination.
+
+Separate MCP processes retain separate leases. Within one server, agents using the same instance ID share that database's edits and persistent Python namespace; IDs isolate routing, not transactions or private copies of the same IDB.
 
 `py_eval` retains its string result/stdout/stderr contract and callback persistence, with an isolated namespace per bridge client. `execute_python` uses its own Nexus namespace and returns JSON-compatible results. These two namespaces are separate. Unified leases remain active until `close_database` or client shutdown; timed idle release is disabled because typed bridge activity is outside Nexus's idle accounting.
 
@@ -49,9 +63,9 @@ Separate MCP processes hold separate Nexus leases and Python state. Closing one 
 - Legacy headless supervisor: `idalib-mcp --stdio`, including explicit GUI/headless modes.
 - Legacy mode retains the advertised IDA 8.3+ floor; the new unified runtime requires 9.4+.
 - Run offline tests with `python -m pytest`. Run IDA tests separately with `ida-mcp-test <copied-fixture>`.
-- Official dependency pins: ida-mcp 20260929.0.1, ida-nexus 0.13.0, ida-domain 0.5.1, ZeroMCP 1.10.3. See [CHANGELOG](CHANGELOG.md) and [implementation design](docs/superpowers/specs/2026-09-30-unified-ida-mcp-design.md).
+- Runtime pins: FastMCP 4.1.0, MCP SDK 2.3.0, ida-mcp 20260929.0.1, ida-nexus 0.13.0, ida-domain 0.5.1, ZeroMCP 1.10.3. See [CHANGELOG](CHANGELOG.md), [implementation design](docs/superpowers/specs/2026-10-16-explicit-instance-routing-design.md), and [local validation results and limits](docs/explicit-instance-validation.md).
 
-The remaining documentation describes the inherited legacy workflows and typed APIs.
+Version 4.0 is a breaking tool-contract upgrade: restart IDA after installing the new plugin, reconnect the MCP client to refresh schemas, then obtain fresh instance IDs. Backends without generation support are reported as incompatible. The remaining documentation describes the legacy launch workflows and typed APIs; every database-specific example requires `instance_id`.
 
 
 
@@ -166,8 +180,8 @@ ida-pro-mcp --install codex,claude-code --transport stdio --scope global
 The proxy advertises the installed tool catalog even when no IDA instance is
 running. Start IDA and its MCP plugin when you need to use a tool; the existing
 client connection can then make calls without refreshing its tool list. The
-`list_instances`, `select_instance`, and `instance_status` tools remain available
-to select a different instance. MCP pings also work while IDA is closed.
+`list_instances` and `instance_status(instance_id)` tools remain available.
+Pass the returned `instance_id` with every operation. MCP pings also work while IDA is closed.
 
 This requires a proxy process independent of IDA. A client configured directly
 with `http://127.0.0.1:13337/mcp` connects to the GUI plugin, which is unavailable
@@ -315,22 +329,21 @@ uv run idalib-mcp --stdio --max-workers 4
 Typical flow:
 
 ```python
-idb_open("/path/to/binary_a.exe", preferred_session_id="binary_a")
-idb_open("/path/to/library.dll", preferred_session_id="library")
-
-decompile("main", database="binary_a")
-xrefs_to("ImportantExport", database="library")
+a = idb_open(input_path="/path/to/binary_a.exe")["instance_id"]
+b = idb_open(input_path="/path/to/library.dll")["instance_id"]
+decompile(addr="main", instance_id=a)
+xrefs_to(addrs="ImportantExport", instance_id=b)
 ```
 
-`database` must be the session ID returned by `idb_open` (or shown in `idb_list`); filenames and paths are not accepted.
+`instance_id` is generated by this server. The old `database` argument and caller-chosen `preferred_session_id` are removed. A disappeared GUI is never silently reopened headlessly under its old ID; explicitly open the file again to obtain a new ID.
 
 ### Management tools
 
-- `idb_open(input_path, mode="prefer_headless", run_auto_analysis=True, build_caches=True, init_hexrays=True, preferred_session_id="")`: Open a binary, warm up subsystems (strings cache, Hex-Rays), and return its session ID. If a worker or GUI for this path is already running on the host, that instance is adopted and `preferred_session_id` is ignored.
-- `idb_list()`: List open sessions and running GUI IDA instances. Each entry has `adopted` (True if this supervisor manages it, False for GUIs/workers discovered but not yet opened via `idb_open`), `backend` (`worker` or `gui`), `is_active`, and process IDs.
-- `idb_close(database, save=True)`: Save (optionally), unregister the session, and terminate its owned worker, freeing a slot toward `--max-workers`. Adopted GUI/worker instances are detached, not killed.
-- `idb_save(session_id, path="")`: Save a session's IDB to disk. Forwarded as a regular worker tool (`database=<id>` injected) — same signature in both backends.
-- Per-database health: call `server_health(database=<id>)` (forwarded). `idb_list()` reports `is_active` from the supervisor's TCP/RPC probe.
+- `idb_open(input_path, mode="prefer_headless", run_auto_analysis=True, build_caches=True, init_hexrays=True)`: open and warm up a binary with the requested GUI/headless policy, returning its instance ID.
+- `idb_list()` / `list_instances()`: list exact databases with identity, path, backend and status.
+- `idb_close(instance_id, save=True)`: drain, optionally save, and release the binding. Owned workers are closed; adopted GUI/workers remain running. A failed save/drain retains the binding in closing state for an explicit close retry; unrelated instances continue.
+- `idb_save(instance_id, path="")` / `save_database(instance_id)`: save the addressed database.
+- `server_health(instance_id)` / `instance_status(instance_id)`: inspect the addressed database/binding.
 
 Worker controls:
 

@@ -120,9 +120,29 @@ class _LateIdaBackend(http.server.BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append((self.path, request))
         response = {"jsonrpc": "2.0", "id": request.get("id")}
-        if request.get("method") == "tools/call" and request.get("params") == {
+        params = request.get("params", {})
+        if params.get("name") == "list_instances":
+            data = {
+                "instances": [
+                    {
+                        "instance_id": "a" * 16,
+                        "generation": "a" * 16,
+                        "identity_version": 1,
+                        "binary_name": "late-backend",
+                        "idb_path": "late.i64",
+                        "pid": 42,
+                    }
+                ],
+                "count": 1,
+            }
+            response["result"] = {
+                "content": [{"type": "text", "text": json.dumps(data)}],
+                "structuredContent": data,
+                "isError": False,
+            }
+        elif params == {
             "name": "server_health",
-            "arguments": {},
+            "arguments": {"instance_id": "a" * 16},
         }:
             health = {"status": "ready", "module": "late-backend"}
             response["result"] = {
@@ -131,7 +151,10 @@ class _LateIdaBackend(http.server.BaseHTTPRequestHandler):
                 "isError": False,
             }
         else:
-            response["error"] = {"code": -32601, "message": "Unexpected backend request"}
+            response["error"] = {
+                "code": -32601,
+                "message": "Unexpected backend request",
+            }
         body = json.dumps(response).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -173,7 +196,9 @@ class ProxyStartupTests(unittest.TestCase):
                         "clientInfo": {"name": "startup-regression", "version": "1"},
                     },
                 )
-                self.assertEqual(initialized["result"]["serverInfo"]["name"], "ida-pro-mcp")
+                self.assertEqual(
+                    initialized["result"]["serverInfo"]["name"], "ida-pro-mcp"
+                )
                 proxy.notify("notifications/initialized")
                 listed = proxy.request("tools/list")["result"]
                 names = {tool["name"] for tool in listed["tools"]}
@@ -184,7 +209,6 @@ class ProxyStartupTests(unittest.TestCase):
                         "decompile",
                         "py_eval",
                         "list_instances",
-                        "select_instance",
                         "instance_status",
                     }.issubset(names),
                     f"Cold-start tools/list is missing normal tools: {sorted(names)}",
@@ -193,9 +217,11 @@ class ProxyStartupTests(unittest.TestCase):
 
                 arguments = {"name": "server_health", "arguments": {}}
                 offline = proxy.request("tools/call", arguments)
-                self.assertEqual(offline["error"]["code"], -32000)
-                self.assertIn("IDA Pro", offline["error"]["message"])
-                self.assertIn(endpoint, offline["error"]["message"])
+                self.assertTrue(offline["result"]["isError"])
+                self.assertEqual(
+                    offline["result"]["_meta"]["ida_mcp"]["error_code"],
+                    "INSTANCE_ID_REQUIRED",
+                )
                 self.assertIsNone(proxy.process.poll())
                 self.assertEqual(proxy.request("tools/list")["result"], listed)
 
@@ -210,6 +236,11 @@ class ProxyStartupTests(unittest.TestCase):
 
                 # Reuse the original process and client tool cache. There is no
                 # initialize or tools/list between backend startup and this call.
+                instances = proxy.request(
+                    "tools/call", {"name": "list_instances", "arguments": {}}
+                )["result"]["structuredContent"]["instances"]
+                self.assertEqual(len(instances), 1)
+                arguments["arguments"]["instance_id"] = instances[0]["instance_id"]
                 online = proxy.request("tools/call", arguments)
                 self.assertNotIn("error", online)
                 self.assertFalse(online["result"]["isError"])
@@ -217,11 +248,14 @@ class ProxyStartupTests(unittest.TestCase):
                     online["result"]["structuredContent"],
                     {"status": "ready", "module": "late-backend"},
                 )
-                self.assertEqual(len(backend.requests), 1)
-                path, forwarded = backend.requests[0]
+                self.assertEqual(len(backend.requests), 3)
+                path, forwarded = backend.requests[-1]
                 self.assertEqual(path, f"/mcp{extensions}")
                 self.assertEqual(forwarded["method"], "tools/call")
-                self.assertEqual(forwarded["params"], arguments)
+                self.assertEqual(
+                    forwarded["params"],
+                    {"name": "server_health", "arguments": {"instance_id": "a" * 16}},
+                )
                 self.assertIsNone(proxy.process.poll())
 
 

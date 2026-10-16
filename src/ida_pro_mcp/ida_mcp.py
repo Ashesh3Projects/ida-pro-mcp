@@ -6,7 +6,6 @@ It loads the actual implementation from the ida_mcp package.
 
 import json
 import sys
-import uuid
 from importlib.metadata import distribution
 from pathlib import Path
 import idaapi
@@ -114,8 +113,11 @@ def _configure_runtime_paths() -> None:
                 candidates.append(Path(package_root))
             # Do not mix binary modules built for another embedded Python ABI.
             if manifest.get("python_version") == list(sys.version_info[:2]):
-                candidates.extend(Path(p) for p in manifest.get("site_packages", [])
-                                  if isinstance(p, str))
+                candidates.extend(
+                    Path(p)
+                    for p in manifest.get("site_packages", [])
+                    if isinstance(p, str)
+                )
         except (OSError, ValueError, TypeError) as error:
             print(f"[MCP] Runtime manifest could not be read: {error}")
     for candidate in reversed(candidates):
@@ -136,8 +138,13 @@ def _start_nexus():
     try:
         package = distribution("ida-nexus")
         expected_plugin = Path(package.locate_file("ida_nexus/plugin.py")).resolve()
-        if package.version != "0.13.0" or Path(plugin.__file__).resolve() != expected_plugin:
-            raise RuntimeError("IDA Nexus 0.13.0 from this installation is required; restart IDA after updating")
+        if (
+            package.version != "0.13.0"
+            or Path(plugin.__file__).resolve() != expected_plugin
+        ):
+            raise RuntimeError(
+                "IDA Nexus 0.13.0 from this installation is required; restart IDA after updating"
+            )
         return plugin if plugin.init(owner="ida-pro-mcp") else None
     except Exception as error:
         print(f"[MCP] Nexus startup failed; legacy server remains available: {error}")
@@ -228,7 +235,11 @@ class MCPConfigHandler(idaapi.action_handler_t):
             if endpoint_changed:
                 print(f"[MCP] Configuration updated: {host}:{port} (not saved)")
 
-        if not endpoint_changed and autostart == old_autostart and persist == old_persist:
+        if (
+            not endpoint_changed
+            and autostart == old_autostart
+            and persist == old_persist
+        ):
             print(f"[MCP] Configuration unchanged: {host}:{port}")
             return 1
 
@@ -273,13 +284,16 @@ class MCP(idaapi.plugin_t):
     DEFAULT_PORT = 13337
 
     def init(self):
+        _configure_runtime_paths()
+        from ida_pro_mcp.ida_mcp.instance_hooks import install_instance_hooks
+
+        install_instance_hooks()
         self._nexus_plugin = _start_nexus()
         hotkey = MCP.wanted_hotkey.replace("-", "+")
         if __import__("sys").platform == "darwin":
             hotkey = hotkey.replace("Alt", "Option")
 
         self.mcp: "ida_mcp.rpc.McpServer | None" = None
-        self.instance_id = uuid.uuid4().hex[:8]
         self.autostart = _get_autostart()
         self.persist_endpoint = _get_persist()
         if self.persist_endpoint:
@@ -317,7 +331,8 @@ class MCP(idaapi.plugin_t):
         if port is not None:
             try:
                 from ida_pro_mcp.ida_mcp.discovery import unregister_instance
-                unregister_instance(port)
+
+                unregister_instance(port, getattr(self, "_registered_generation", ""))
             except Exception as e:
                 print(f"[MCP] Instance unregistration failed: {e}")
             self._registered_port = None
@@ -337,6 +352,18 @@ class MCP(idaapi.plugin_t):
         # Keep module identity stable while a Nexus bridge owns its registries.
         # The official distribution also uses the top-level name ida_mcp.
         from ida_pro_mcp.ida_mcp import MCP_SERVER, IdaMcpHttpRequestHandler
+        from ida_pro_mcp.ida_mcp.instance_hooks import (
+            install_instance_hooks,
+            activate_database,
+        )
+        from ida_pro_mcp.ida_mcp.instance_dispatch import install_instance_dispatch
+
+        install_instance_hooks(self._database_identity_changed)
+        from ida_pro_mcp.instance_runtime import runtime_identity
+
+        if not runtime_identity().snapshot():
+            activate_database()
+        install_instance_dispatch(MCP_SERVER)
 
         port = self.port
         max_port = port + 100
@@ -347,6 +374,7 @@ class MCP(idaapi.plugin_t):
                 )
                 print(f"  Config: http://{self.host}:{port}/config.html")
                 self.mcp = MCP_SERVER
+                self._listener_port = port
                 self._register_instance(port)
                 return
             except OSError as e:
@@ -362,6 +390,11 @@ class MCP(idaapi.plugin_t):
             import os
             import idc
             import ida_nalt
+            from ida_pro_mcp.instance_runtime import runtime_identity
+
+            identity = runtime_identity().snapshot()
+            if not identity:
+                return
             binary = ida_nalt.get_root_filename() or ""
             binary_path = ida_nalt.get_input_file_path() or ""
             idb_path = idc.get_idb_path() or ""
@@ -372,15 +405,27 @@ class MCP(idaapi.plugin_t):
                 binary=binary,
                 binary_path=binary_path,
                 idb_path=idb_path,
-                instance_id=self.instance_id,
+                instance_id=identity["instance_id"],
+                generation=identity["generation"],
             )
             self._registered_port = port
-            print(f"[MCP] Registered instance: {binary} (pid={os.getpid()}, port={port})")
+            self._registered_generation = identity["generation"]
+            print(
+                f"[MCP] Registered instance: {binary} (pid={os.getpid()}, port={port})"
+            )
             print(f"  Discovery file: {file_path}")
         except Exception as e:
             import traceback
+
             print(f"[MCP] Instance registration failed: {e}")
             traceback.print_exc()
+
+    def _database_identity_changed(self):
+        # Listener lifetime is independent of a database's discovery record.
+        port = getattr(self, "_listener_port", None)
+        if port is not None:
+            self._unregister_instance()
+            self._register_instance(port)
 
     def _stop_server(self):
         """Stop the server and remove its discovery registration."""
@@ -388,6 +433,7 @@ class MCP(idaapi.plugin_t):
         if self.mcp:
             self.mcp.stop()
             self.mcp = None
+        self._listener_port = None
 
     def _restart_server(self):
         """Apply configuration changes without changing toggle semantics."""

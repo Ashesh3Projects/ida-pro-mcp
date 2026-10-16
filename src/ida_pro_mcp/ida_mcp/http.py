@@ -138,7 +138,27 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
         if output_match:
             if not self._check_api_request():
                 return
-            self._handle_output_download(output_match.group(1), output_match.group(2))
+            from ida_pro_mcp.instance_contract import RoutingError, require_instance_id
+            from ida_pro_mcp.instance_runtime import (
+                runtime_identity,
+                generation_context,
+            )
+
+            try:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query) != {"instance_id"} or len(query["instance_id"]) != 1:
+                    raise RoutingError(
+                        "INSTANCE_ID_REQUIRED",
+                        "Output requires exactly one instance_id",
+                    )
+                generation = require_instance_id(query["instance_id"][0])
+                runtime_identity().check(generation)
+                with generation_context(generation):
+                    self._handle_output_download(
+                        output_match.group(1), output_match.group(2)
+                    )
+            except RoutingError as error:
+                self.send_error(409, str(error))
             return
 
         super().do_GET()

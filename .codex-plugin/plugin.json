@@ -1,6 +1,6 @@
 {
   "name": "ida-pro-mcp",
-  "version": "3.0.1",
+  "version": "4.0.1",
   "description": "AI-powered reverse engineering assistant that bridges IDA Pro with language models through MCP.",
   "author": {
     "name": "Ashesh3",

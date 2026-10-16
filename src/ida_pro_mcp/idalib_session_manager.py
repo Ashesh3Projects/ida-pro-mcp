@@ -8,6 +8,7 @@ there is no implicit "current session" or transport-context binding.
 import uuid
 import threading
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, Optional, Any
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ import idapro
 import ida_auto
 
 from .ida_mcp.api_core import invalidate_strings_cache
+from .instance_runtime import runtime_identity
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,9 @@ class IDASessionManager:
 
             logger.info(f"Opening database: {input_path} (session: {session_id})")
             self._activate_database_path(str(input_path), run_auto_analysis)
+            # This process owns only one live database. Closed metadata cannot
+            # resurrect a prior database through an old session handle.
+            self._sessions.clear()
 
             session = IDASession(
                 session_id=session_id,
@@ -174,10 +179,20 @@ class IDASessionManager:
 
         if idapro.open_database(input_path, run_auto_analysis=run_auto_analysis):
             raise RuntimeError(f"Failed to open database: {input_path}")
+        runtime_identity().activate(input_path, input_path)
 
     def _close_active_database(self) -> None:
+        previous = runtime_identity().snapshot().get("generation")
+        runtime_identity().invalidate()
+        # The headless worker does not install GUI hooks. If its direct
+        # dispatcher exists, retire its old Python contexts explicitly.
+        dispatcher = sys.modules.get("ida_pro_mcp.ida_mcp.instance_dispatch")
+        if previous and dispatcher is not None:
+            dispatcher.retire_database_contexts(previous)
         if self._active_session_id is not None:
-            logger.debug("Closing active database (session: %s)", self._active_session_id)
+            logger.debug(
+                "Closing active database (session: %s)", self._active_session_id
+            )
             idapro.close_database()
             self._active_session_id = None
 

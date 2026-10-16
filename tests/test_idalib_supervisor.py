@@ -67,9 +67,17 @@ class _FakeSupervisor(supmod.IdalibSupervisor):
                 },
             }
         if method == "resources/list":
-            return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"resources": []}}
+            return {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {"resources": []},
+            }
         if method == "resources/templates/list":
-            return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"resourceTemplates": []}}
+            return {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {"resourceTemplates": []},
+            }
         self.forwarded.append(payload)
         return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"ok": True}}
 
@@ -84,7 +92,7 @@ class _FakeSupervisor(supmod.IdalibSupervisor):
             return {
                 "success": True,
                 "session": {
-                    "session_id": arguments["preferred_session_id"],
+                    "session_id": "backend-private",
                     "input_path": arguments["input_path"],
                     "filename": Path(arguments["input_path"]).name,
                     "created_at": "now",
@@ -139,25 +147,33 @@ def test_supervisor_import_does_not_import_ida_modules():
         (["--no-unsafe"], "--no-unsafe"),
     ],
 )
-def test_cli_forwards_unsafe_choice_to_spawned_worker(monkeypatch, flags, expected_flag):
+def test_cli_forwards_unsafe_choice_to_spawned_worker(
+    monkeypatch, flags, expected_flag
+):
+    # Import the actual frontend before replacing subprocess.Popen at the
+    # process-creation boundary; SDK class annotations inspect that type.
+    from ida_pro_mcp import fastmcp_frontend
+
     commands = []
 
     def start_process(command, **kwargs):
         commands.append(command)
         return _FakeProcess()
 
-    server = supmod.McpServer("test")
-    monkeypatch.setattr(supmod, "mcp", server)
-    monkeypatch.setattr(supmod, "supervisor", None)
     monkeypatch.setattr(sys, "argv", ["idalib-mcp", "--stdio", *flags])
-    monkeypatch.setattr(supmod.signal, "signal", lambda *_args: None)
     monkeypatch.setattr(supmod.subprocess, "Popen", start_process)
     monkeypatch.setattr(
         supmod.IdalibSupervisor, "_wait_worker_ready", lambda *_args: None
     )
-    monkeypatch.setattr(
-        server, "stdio", lambda: supmod.supervisor._schema_or_idle_worker()
-    )
+
+    def capture_frontend(router, **kwargs):
+        class Host:
+            def run(self, **options):
+                router.provider.supervisor._schema_or_idle_worker()
+
+        return Host()
+
+    monkeypatch.setattr(fastmcp_frontend, "create_server", capture_frontend)
 
     supmod.main()
 
@@ -264,117 +280,16 @@ def test_open_session_cleans_new_parts_after_worker_failure(tmp_path):
     assert packed.read_bytes() == b"packed database"
 
 
-def test_failed_gui_fallback_cleans_new_parts_after_worker_failure(tmp_path):
-    sample = tmp_path / "sample.bin"
-    sample.write_bytes(b"sample")
-    existing = Path(str(sample) + ".id0")
-    existing.write_bytes(b"existing database state")
-
-    class _FailingSupervisor(_FakeSupervisor):
-        def call_worker_tool(self, worker, name, arguments=None, *, timeout=None):
-            assert arguments is not None
-            Path(arguments["input_path"] + ".id1").write_bytes(b"incomplete")
-            raise ConnectionResetError(10054, "worker reset")
-
-    gui_session = supmod.WorkerSession(
-        session_id="gui",
-        input_path=str(sample),
-        filename=sample.name,
-        backend="gui",
-        owned=False,
-    )
-    sup = _FailingSupervisor()
-    with pytest.raises(ConnectionResetError):
-        sup._reopen_gui_session_headless(gui_session)
-
-    assert existing.read_bytes() == b"existing database state"
-    assert not Path(str(sample) + ".id1").exists()
-
-
 def test_worker_tools_inject_database_and_filter_management_tools():
     sup = _FakeSupervisor()
     tools = sup.worker_tools()
     names = [tool["name"] for tool in tools]
-    assert names == ["decompile"]
-    schema = tools[0]["inputSchema"]
-    assert "database" in schema["properties"]
-    assert "database" in schema.get("required", [])
-
-
-def test_inject_database_arg_marks_required():
-    sup = _FakeSupervisor()
-    injected = sup._inject_database_arg(
-        {
-            "name": "decompile",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"addr": {"type": "string"}},
-                "required": ["addr"],
-            },
-        }
-    )
-    schema = injected["inputSchema"]
-    assert "database" in schema["properties"]
-    assert "database" in schema["required"]
-
-
-def test_inject_database_arg_is_idempotent_in_required_list():
-    sup = _FakeSupervisor()
-    injected = sup._inject_database_arg(
-        {
-            "name": "decompile",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"addr": {"type": "string"}},
-                "required": ["addr", "database"],
-            },
-        }
-    )
-    required = injected["inputSchema"]["required"]
-    assert required.count("database") == 1
-
-
-def test_handle_tools_call_errors_when_database_missing():
-    old_supervisor = supmod.supervisor
-    supmod.supervisor = _FakeSupervisor()
-    try:
-        result = supmod._handle_tools_call(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": "decompile", "arguments": {"addr": "0x1000"}},
-            }
-        )
-        assert result is not None
-        assert result["result"]["isError"] is True
-        text = result["result"]["content"][0]["text"]
-        assert "database is required" in text
-        assert not supmod.supervisor.forwarded
-    finally:
-        supmod.supervisor = old_supervisor
-
-
-def test_handle_tools_call_errors_when_database_empty():
-    old_supervisor = supmod.supervisor
-    supmod.supervisor = _FakeSupervisor()
-    try:
-        result = supmod._handle_tools_call(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "decompile",
-                    "arguments": {"addr": "0x1000", "database": ""},
-                },
-            }
-        )
-        assert result is not None
-        assert result["result"]["isError"] is True
-        assert "database is required" in result["result"]["content"][0]["text"]
-    finally:
-        supmod.supervisor = old_supervisor
+    assert "decompile" in names and "idb_open" not in names
+    assert sup.opened == []
+    for tool in tools:
+        schema = tool["inputSchema"]
+        assert "instance_id" in schema["required"]
+        assert "database" not in schema["properties"]
 
 
 def test_open_session_rejects_unknown_mode(tmp_path):
@@ -409,7 +324,9 @@ def test_open_session_prefer_headless_skips_gui_discovery(tmp_path):
     )
     try:
         sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="sample", mode="prefer_headless")
+        session = sup.open_session(
+            str(sample), session_id="sample", mode="prefer_headless"
+        )
         assert session.backend == "worker"
         assert sup.opened, "expected the worker to be invoked despite a running GUI"
     finally:
@@ -436,7 +353,9 @@ def test_open_session_force_headless_ignores_running_gui(tmp_path):
     )
     try:
         sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="sample", mode="force_headless")
+        session = sup.open_session(
+            str(sample), session_id="sample", mode="force_headless"
+        )
         assert session.backend == "worker"
     finally:
         restore()
@@ -491,7 +410,9 @@ def test_idb_list_includes_unadopted_gui_instances(tmp_path, monkeypatch):
             }
         ],
     )
-    monkeypatch.setattr(supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True
+    )
 
     listed = sup.list_sessions()
     by_id = {entry["session_id"]: entry for entry in listed}
@@ -521,7 +442,9 @@ def test_idb_list_reports_unadopted_worker_instances_as_workers(tmp_path, monkey
             }
         ],
     )
-    monkeypatch.setattr(supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True
+    )
 
     listed = _FakeSupervisor().list_sessions()
 
@@ -552,7 +475,9 @@ def test_prefer_headless_adopts_only_registered_worker_backend(tmp_path):
     )
     try:
         sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="sample", mode="prefer_headless")
+        session = sup.open_session(
+            str(sample), session_id="sample", mode="prefer_headless"
+        )
         assert session.backend == "worker"
         assert session.owned is True
         assert sup.opened, "legacy GUI registration should not be adopted as a worker"
@@ -581,7 +506,9 @@ def test_idb_list_omits_unadopted_when_already_adopted(tmp_path, monkeypatch):
     try:
         sup = _FakeSupervisor()
         sup.open_session(str(sample), session_id="gui", mode="prefer_gui")
-        monkeypatch.setattr(supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(
+            supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True
+        )
         listed = sup.list_sessions()
         assert all(entry["adopted"] for entry in listed)
         assert len(listed) == 1
@@ -648,25 +575,19 @@ def test_resolve_session_requires_database():
         try:
             sup.resolve_session(value)
         except RuntimeError as e:
-            assert "database is required" in str(e)
+            assert "session ID is required" in str(e)
         else:
             raise AssertionError(f"expected RuntimeError for database={value!r}")
-
-
-def test_tool_error_result_omits_structured_content():
-    result = supmod._call_tool_result({"error": "no database"}, is_error=True)
-    assert result["isError"] is True
-    assert "structuredContent" not in result
 
 
 def test_open_session_reuses_schema_worker(tmp_path):
     sample = tmp_path / "sample.bin"
     sample.write_bytes(b"x")
     sup = _FakeSupervisor()
-    sup.worker_tools()  # creates the idle/schema worker
+    sup._schema_or_idle_worker()
     session = sup.open_session(str(sample), session_id="sample")
     assert session.session_id == "sample"
-    assert sup.opened[0][1]["preferred_session_id"] == "sample"
+    assert "preferred_session_id" not in sup.opened[0][1]
 
 
 def test_resolve_session_only_accepts_session_id(tmp_path):
@@ -804,7 +725,9 @@ def test_open_session_prunes_unreachable_existing_mapping(tmp_path):
         with sup._lock:
             sup._register_session_locked(stale, str(sample.resolve()))
 
-        sup._session_is_reachable = lambda session: session.session_id != "stale" and session.is_alive()
+        sup._session_is_reachable = lambda session: (
+            session.session_id != "stale" and session.is_alive()
+        )
 
         session = sup.open_session(str(sample), session_id="new")
 
@@ -857,8 +780,12 @@ def test_probe_session_health_reports_rpc_ping_failure(monkeypatch):
         def __exit__(self, *_args):
             return False
 
-    monkeypatch.setattr(supmod.socket, "create_connection", lambda *_args, **_kwargs: _FakeSocket())
-    sup._worker_rpc = lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("rpc timeout"))
+    monkeypatch.setattr(
+        supmod.socket, "create_connection", lambda *_args, **_kwargs: _FakeSocket()
+    )
+    sup._worker_rpc = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        TimeoutError("rpc timeout")
+    )
 
     health = sup._probe_session_health(worker)
 
@@ -937,7 +864,8 @@ def test_resolve_session_does_not_retry_probe_on_busy_worker(monkeypatch):
     probes = []
     original = sup._probe_session_health
     sup._probe_session_health = lambda *a, **kw: (
-        probes.append(kw), original(*a, **kw)
+        probes.append(kw),
+        original(*a, **kw),
     )[1]
 
     sup.resolve_session("worker")
@@ -987,39 +915,6 @@ def test_list_sessions_marks_busy_worker_active(monkeypatch):
 
     assert entry["is_active"] is True
     assert entry["busy"] is True
-
-
-def test_handle_tools_call_reports_busy_on_worker_timeout(monkeypatch, tmp_path):
-    sample = tmp_path / "sample.bin"
-    sample.write_bytes(b"x")
-    sup = _FakeSupervisor()
-    sup.open_session(str(sample), session_id="sample")
-
-    def timeout_rpc(*_a, **_k):
-        raise supmod.socket.timeout("timed out")
-
-    sup._worker_rpc = timeout_rpc
-    old_supervisor = supmod.supervisor
-    supmod.supervisor = sup
-    try:
-        result = supmod._handle_tools_call(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "decompile",
-                    "arguments": {"addr": "0x1000", "database": "sample"},
-                },
-            }
-        )
-    finally:
-        supmod.supervisor = old_supervisor
-
-    assert result is not None
-    assert result["result"]["isError"] is True
-    assert "still busy" in result["result"]["content"][0]["text"]
-    assert "sample" in sup.sessions
 
 
 def test_list_sessions_reports_is_active_from_health_probe(tmp_path):
@@ -1084,7 +979,7 @@ def test_close_session_requires_database():
     try:
         sup.close_session("")
     except RuntimeError as e:
-        assert "database is required" in str(e)
+        assert "session ID is required" in str(e)
     else:
         raise AssertionError("expected RuntimeError for empty database")
 
@@ -1175,21 +1070,6 @@ def test_close_session_skips_save_when_unreachable(tmp_path):
     assert session.process.returncode == 0
 
 
-def test_idb_close_tool_returns_error_for_unknown_session():
-    old_supervisor = supmod.supervisor
-    supmod.supervisor = _FakeSupervisor()
-    try:
-        result = supmod.idb_close("nope")
-        assert "not found" in result["error"]
-    finally:
-        supmod.supervisor = old_supervisor
-
-
-def test_idb_close_is_a_management_tool_symbol():
-    assert "idb_close" in supmod.IDB_MANAGEMENT_TOOLS
-    assert callable(supmod.idb_close)
-
-
 def test_supervisor_uses_idb_prefixed_management_tools_only():
     """No legacy names should leak into IDB_MANAGEMENT_TOOLS or module symbols."""
     legacy = {
@@ -1245,7 +1125,7 @@ def test_open_session_race_discards_losing_worker_for_existing_path(tmp_path):
         session = sup.open_session(str(sample))
         assert session.session_id == "winner"
         assert set(sup.sessions) == {"winner"}
-        assert sup.opened[0][1]["preferred_session_id"] != "winner"
+        assert "preferred_session_id" not in sup.opened[0][1]
     finally:
         restore()
 
@@ -1309,7 +1189,7 @@ def test_open_session_race_rejects_duplicate_session_id_for_different_path(tmp_p
             result = super().call_worker_tool(worker, name, arguments)
             if name == "idb_open":
                 existing = supmod.WorkerSession(
-                    session_id=arguments["preferred_session_id"],
+                    session_id="shared",
                     input_path=str(first.resolve()),
                     filename="first.bin",
                     process=_FakeProcess(),
@@ -1332,130 +1212,6 @@ def test_open_session_race_rejects_duplicate_session_id_for_different_path(tmp_p
         assert sup.sessions["shared"].input_path == str(first.resolve())
         assert sup.path_to_session.get(sup._path_key(str(second.resolve()))) is None
         assert sup.spawned[0].process.returncode == 0
-    finally:
-        restore()
-
-
-def test_closed_gui_session_reopens_headless(tmp_path):
-    sample = tmp_path / "sample.bin"
-    idb = tmp_path / "sample.bin.i64"
-    sample.write_bytes(b"x")
-    idb.write_bytes(b"idb")
-    restore = _patch_discovery(
-        instances=[
-            {
-                "host": "127.0.0.1",
-                "port": 31337,
-                "pid": 999,
-                "binary": "sample.bin",
-                "idb_path": str(idb),
-                "started_at": "now",
-            }
-        ],
-        probe=True,
-    )
-    try:
-        sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="gui", mode="prefer_gui")
-        assert session.backend == "gui"
-        supmod._discovery.probe_instance = lambda *_args, **_kwargs: False
-        reopened = sup.resolve_session("gui")
-        assert reopened.backend == "worker"
-        assert reopened.session_id == "gui"
-        assert sup.opened[-1][1]["input_path"] == str(idb.resolve())
-    finally:
-        restore()
-
-
-def test_closed_gui_session_falls_back_to_requested_binary_if_idb_is_stale(tmp_path):
-    sample = tmp_path / "sample.bin"
-    idb = tmp_path / "sample.bin.i64"
-    sample.write_bytes(b"x")
-    idb.write_bytes(b"idb")
-    restore = _patch_discovery(
-        instances=[
-            {
-                "host": "127.0.0.1",
-                "port": 31337,
-                "pid": 999,
-                "binary": "sample.bin",
-                "idb_path": str(idb),
-                "started_at": "now",
-            }
-        ],
-        probe=True,
-    )
-    try:
-        sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="gui", mode="prefer_gui")
-        assert session.backend == "gui"
-        idb.unlink()
-        supmod._discovery.probe_instance = lambda *_args, **_kwargs: False
-        reopened = sup.resolve_session("gui")
-        assert reopened.backend == "worker"
-        assert reopened.session_id == "gui"
-        assert sup.opened[-1][1]["input_path"] == str(sample.resolve())
-    finally:
-        restore()
-
-
-def test_closed_gui_session_does_not_reappear_if_closed_during_headless_fallback(tmp_path):
-    sample = tmp_path / "sample.bin"
-    idb = tmp_path / "sample.bin.i64"
-    sample.write_bytes(b"x")
-    idb.write_bytes(b"idb")
-
-    class _RaceSupervisor(_FakeSupervisor):
-        def __init__(self):
-            super().__init__()
-            self.spawned = []
-
-        def _spawn_worker(self):
-            worker = super()._spawn_worker()
-            self.spawned.append(worker)
-            return worker
-
-        def call_worker_tool(self, worker, name, arguments=None, *, timeout=None):
-            result = super().call_worker_tool(worker, name, arguments)
-            if name == "idb_open":
-                # Simulate: the session disappears while the reopen worker
-                # is doing the open. Drop it from the supervisor's registry
-                # and tear down the spawning worker.
-                sid = arguments["preferred_session_id"]
-                with self._lock:
-                    stale = self._unregister_session_locked(sid)
-                if stale is not None:
-                    self._terminate_worker(stale)
-            return result
-
-    restore = _patch_discovery(
-        instances=[
-            {
-                "host": "127.0.0.1",
-                "port": 31337,
-                "pid": 999,
-                "binary": "sample.bin",
-                "idb_path": str(idb),
-                "started_at": "now",
-            }
-        ],
-        probe=True,
-    )
-    try:
-        sup = _RaceSupervisor()
-        session = sup.open_session(str(sample), session_id="gui", mode="prefer_gui")
-        assert session.backend == "gui"
-        supmod._discovery.probe_instance = lambda *_args, **_kwargs: False
-
-        try:
-            sup.resolve_session("gui")
-        except RuntimeError as e:
-            assert "was closed or replaced" in str(e)
-        else:
-            raise AssertionError("expected RuntimeError")
-
-        assert "gui" not in sup.sessions
-        assert sup.spawned[-1].process.returncode == 0
     finally:
         restore()
 

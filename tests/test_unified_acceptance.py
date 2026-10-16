@@ -19,8 +19,12 @@ import pytest
 def test_unified_stdio_fixture(tmp_path):
     """Typed and official APIs share a database, cancel cleanly, and preserve peers."""
     root = Path(__file__).resolve().parents[1]
-    fixture = tmp_path / "typed_fixture.elf"
+    fixture = tmp_path / "a" / "typed_fixture.elf"
+    second = tmp_path / "b" / "typed_fixture.elf"
+    fixture.parent.mkdir()
+    second.parent.mkdir()
     shutil.copy2(root / "tests/typed_fixture.elf", fixture)
+    shutil.copy2(root / "tests/typed_fixture.elf", second)
     env = dict(os.environ)
     env.update(
         IDA_NEXUS_STATE_DIR=str(tmp_path / "nexus"),
@@ -45,7 +49,7 @@ def test_unified_stdio_fixture(tmp_path):
     for license_file in license_root.glob("*.hexlic"):
         shutil.copy2(license_file, Path(env["IDAUSR"]) / license_file.name)
     result = subprocess.run(
-        [sys.executable, str(root / "tests/unified_acceptance.py"), str(fixture)],
+        [sys.executable, str(root / "tests/multi_instance_acceptance.py"), "--mode", "headless", "--fixture-a", str(fixture), "--fixture-b", str(second)],
         env=env,
         cwd=tmp_path,
         capture_output=True,
@@ -61,8 +65,7 @@ def test_unified_http_discovery_without_ida(tmp_path):
     import socket
     import time
 
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
+    from fastmcp import Client
 
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -94,26 +97,21 @@ def test_unified_http_discovery_without_ida(tmp_path):
                     time.sleep(0.05)
 
             async def check():
-                async with streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (
-                    read,
-                    write,
-                    _,
-                ):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        tools = await session.list_tools()
-                        names = {tool.name for tool in tools.tools}
-                        assert len(names) == 73
-                        assert {
-                            "reference",
-                            "decompile",
-                            "execute_python",
-                            "read_output",
-                        } <= names
-                        result = await session.call_tool(
-                            "reference", {"query": "decompile"}
-                        )
-                        assert not result.isError
+                async with Client(f"http://127.0.0.1:{port}/mcp") as client:
+                    tools = await client.list_tools()
+                    names = {tool.name for tool in tools}
+                    assert len(names) == 75
+                    assert {
+                        "reference",
+                        "decompile",
+                        "execute_python",
+                        "read_output",
+                        "list_instances",
+                    } <= names
+                    result = await client.call_tool_mcp(
+                        "reference", {"query": "decompile"}
+                    )
+                    assert not result.is_error
 
             asyncio.run(check())
         finally:

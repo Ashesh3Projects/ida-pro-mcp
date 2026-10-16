@@ -29,7 +29,7 @@ from ida_pro_mcp.worker_lifecycle import WorkerLifecycle
 
 
 class IdalibSessionInfo(TypedDict):
-    session_id: str
+    instance_id: str
     input_path: str
     filename: str
     created_at: str
@@ -74,6 +74,9 @@ _BOUND_PORT: int = 0
 def _register_in_discovery(host: str, port: int, input_path: Path) -> None:
     global _REGISTERED_PORT
     try:
+        from ida_pro_mcp.instance_runtime import runtime_identity
+
+        identity = runtime_identity().snapshot()
         register_instance(
             host=host,
             port=port,
@@ -82,6 +85,8 @@ def _register_in_discovery(host: str, port: int, input_path: Path) -> None:
             binary_path=str(input_path),
             idb_path=str(input_path),
             backend="worker",
+            instance_id=identity["instance_id"],
+            generation=identity["generation"],
         )
         _REGISTERED_PORT = port
         logger.info("Registered idalib worker in discovery (port %d)", port)
@@ -110,10 +115,6 @@ def idb_open(
         int,
         "Minimum idle TTL in seconds before the headless worker self-exits.",
     ] = 600,
-    preferred_session_id: Annotated[
-        str,
-        "Preferred session ID (auto-generated if empty). Ignored if the file is already open.",
-    ] = "",
 ) -> IdalibOpenResult:
     """Open a binary, activate it, and warm up subsystems in one call."""
 
@@ -126,7 +127,6 @@ def idb_open(
                 build_caches,
                 init_hexrays,
                 idle_ttl_sec,
-                preferred_session_id,
             ),
             label="idb_open",
         )
@@ -138,7 +138,6 @@ def idb_open(
         opened_session_id = manager.open_binary(
             resolved_path,
             run_auto_analysis=run_auto_analysis,
-            session_id=preferred_session_id or None,
         )
         session = manager.activate_session(opened_session_id)
         warmup: ServerWarmupResult | None = None
@@ -149,14 +148,19 @@ def idb_open(
                 init_hexrays=init_hexrays,
             )
         _LIFECYCLE.set_idle_ttl(float(idle_ttl_sec), time.monotonic() - load_started_at)
-        if _REGISTERED_PORT is None and _BOUND_HOST and _BOUND_PORT:
+        if _BOUND_HOST and _BOUND_PORT:
             _register_in_discovery(_BOUND_HOST, _BOUND_PORT, session.input_path)
+        from ida_pro_mcp.instance_runtime import runtime_identity
+
+        public_session = session.to_dict()
+        public_session.pop("session_id", None)
+        public_session["instance_id"] = runtime_identity().snapshot()["instance_id"]
         return {
             "success": True,
-            "session": session.to_dict(),
+            "session": public_session,
             "warmup": warmup,
             "message": (
-                f"Binary opened: {session.input_path.name} ({opened_session_id})"
+                f"Binary opened: {session.input_path.name} ({public_session['instance_id']})"
             ),
         }
     except (FileNotFoundError, RuntimeError, ValueError) as e:
@@ -170,8 +174,10 @@ def idb_list() -> IdalibListResult:
     """List open IDA sessions."""
 
     try:
-        manager = get_session_manager()
-        sessions = manager.list_sessions()
+        from ida_pro_mcp.instance_runtime import runtime_identity
+
+        info = runtime_identity().snapshot()
+        sessions = [info] if info else []
         return {"sessions": sessions, "count": len(sessions)}
     except Exception as e:
         return {"error": f"Failed to list sessions: {e}"}
@@ -179,6 +185,9 @@ def idb_list() -> IdalibListResult:
 
 def _install_dispatch_hook() -> None:
     """Wrap the registry dispatcher so every request bumps the watchdog timer."""
+    from ida_pro_mcp.ida_mcp.instance_dispatch import install_instance_dispatch
+
+    install_instance_dispatch(MCP_SERVER)
     original = MCP_SERVER.registry.dispatch
 
     def touching_dispatch(request):

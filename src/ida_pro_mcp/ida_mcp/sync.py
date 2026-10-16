@@ -126,10 +126,12 @@ def _sync_wrapper(ff, keep_batch=False):
             # execute_sync() discards exceptions escaping the callback, so a
             # raise here leaves res_container empty and the requesting thread
             # blocked forever on the res_container.get() below (issue #217).
-            res_container.put(IDASyncError(
-                f"Call stack is not empty while calling the function "
-                f"{ff.__name__} from {last_func_name}"
-            ))
+            res_container.put(
+                IDASyncError(
+                    f"Call stack is not empty while calling the function "
+                    f"{ff.__name__} from {last_func_name}"
+                )
+            )
             return
 
         call_stack.put((ff.__name__))
@@ -318,7 +320,14 @@ def idasync(f):
         # Capture on the requesting thread before either execute_sync or the
         # legacy headless pump hands work off to IDA's main thread.
         context = copy_context()
-        ff = functools.partial(context.run, f, *args, **kwargs)
+
+        def guarded_call():
+            from ida_pro_mcp.instance_runtime import check_request_generation
+
+            check_request_generation()
+            return f(*args, **kwargs)
+
+        ff = functools.partial(context.run, guarded_call)
         ff.__name__ = f.__name__
         cancel_event = get_bridge_cancel_event() or get_current_cancel_event()
         timeout_override = _normalize_timeout(
@@ -328,7 +337,9 @@ def idasync(f):
 
         pump = get_pump()
         if not pump.active or pump.on_main_thread():
-            return sync_wrapper(ff, timeout_override, keep_batch=keep_batch, cancel_event=cancel_event)
+            return sync_wrapper(
+                ff, timeout_override, keep_batch=keep_batch, cancel_event=cancel_event
+            )
 
         # Headless: IDA only runs on the pump thread, so hand the whole
         # synchronized body over and wait for it there.
@@ -338,7 +349,10 @@ def idasync(f):
         try:
             return pump.submit(
                 lambda: sync_wrapper(
-                    ff, timeout_override, keep_batch=keep_batch, cancel_event=cancel_event
+                    ff,
+                    timeout_override,
+                    keep_batch=keep_batch,
+                    cancel_event=cancel_event,
                 ),
                 label=f.__name__,
                 timeout=(timeout + _PUMP_WAIT_SLACK_SEC) if timeout > 0 else None,

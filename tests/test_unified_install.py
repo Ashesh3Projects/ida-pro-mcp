@@ -65,6 +65,13 @@ def test_package_loader_keeps_official_namespace_intact(monkeypatch):
     fork_package.MCP_SERVER = fake_server
     fork_package.IdaMcpHttpRequestHandler = object
     monkeypatch.setitem(sys.modules, "ida_pro_mcp.ida_mcp", fork_package)
+    hooks = ModuleType("ida_pro_mcp.ida_mcp.instance_hooks")
+    hooks.install_instance_hooks = lambda callback=None: None
+    hooks.activate_database = lambda: None
+    dispatch = ModuleType("ida_pro_mcp.ida_mcp.instance_dispatch")
+    dispatch.install_instance_dispatch = lambda server: None
+    monkeypatch.setitem(sys.modules, hooks.__name__, hooks)
+    monkeypatch.setitem(sys.modules, dispatch.__name__, dispatch)
     monkeypatch.setattr(loader, "unload_package", lambda name: seen.append(name))
     instance = loader.MCP()
     instance.host = "127.0.0.1"
@@ -118,6 +125,7 @@ def test_runtime_paths_prefer_pinned_matching_abi(tmp_path, monkeypatch):
 
 def test_non_object_plugin_manifest_does_not_break_discovery(tmp_path):
     from ida_pro_mcp.official_adapter import _canonical_gui_plugin_installed
+
     for document in ("[]", "null", '"invalid"'):
         (tmp_path / "ida-pro-mcp-runtime.json").write_text(document)
         assert _canonical_gui_plugin_installed(tmp_path) is False
@@ -125,13 +133,16 @@ def test_non_object_plugin_manifest_does_not_break_discovery(tmp_path):
 
 def test_installer_honors_explicit_idausr(tmp_path, monkeypatch):
     from ida_pro_mcp import installer
-    primary=tmp_path/"custom-user"
-    secondary=tmp_path/"fallback"
-    monkeypatch.setenv("IDAUSR",str(primary)+os.pathsep+str(secondary))
+
+    primary = tmp_path / "custom-user"
+    secondary = tmp_path / "fallback"
+    monkeypatch.setenv("IDAUSR", str(primary) + os.pathsep + str(secondary))
     assert Path(installer._get_ida_user_dir()) == primary
 
 
-def test_mismatched_abi_manifest_does_not_load_external_binary_packages(tmp_path, monkeypatch):
+def test_mismatched_abi_manifest_does_not_load_external_binary_packages(
+    tmp_path, monkeypatch
+):
     """A GUI on Python 3.11 must not import a client's Python 3.12 site-packages."""
     fake_idaapi = ModuleType("idaapi")
     fake_idaapi.Form = SimpleNamespace
@@ -140,18 +151,72 @@ def test_mismatched_abi_manifest_does_not_load_external_binary_packages(tmp_path
     fake_idaapi.PLUGIN_KEEP = 0
     fake_kernwin = ModuleType("ida_kernwin")
     fake_kernwin.UI_Hooks = object
-    monkeypatch.setitem(sys.modules,"idaapi",fake_idaapi)
-    monkeypatch.setitem(sys.modules,"ida_kernwin",fake_kernwin)
-    monkeypatch.setitem(sys.modules,"ida_netnode",ModuleType("ida_netnode"))
-    spec=importlib.util.spec_from_file_location("_loader_abi_test",installer.IDA_PLUGIN_LOADER)
-    loader=importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "idaapi", fake_idaapi)
+    monkeypatch.setitem(sys.modules, "ida_kernwin", fake_kernwin)
+    monkeypatch.setitem(sys.modules, "ida_netnode", ModuleType("ida_netnode"))
+    spec = importlib.util.spec_from_file_location(
+        "_loader_abi_test", installer.IDA_PLUGIN_LOADER
+    )
+    loader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loader)
-    external=tmp_path/"other-python-site-packages"
+    external = tmp_path / "other-python-site-packages"
     external.mkdir()
-    (tmp_path/"ida-pro-mcp-runtime.json").write_text(json.dumps({
-        "python_version":[3,99],"site_packages":[str(external)]
-    }))
-    monkeypatch.setattr(loader,"__file__",str(tmp_path/"ida_mcp.py"))
-    monkeypatch.setattr(sys,"path",list(sys.path))
+    (tmp_path / "ida-pro-mcp-runtime.json").write_text(
+        json.dumps({"python_version": [3, 99], "site_packages": [str(external)]})
+    )
+    monkeypatch.setattr(loader, "__file__", str(tmp_path / "ida_mcp.py"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
     loader._configure_runtime_paths()
     assert str(external) not in sys.path
+
+
+def test_running_listener_republishes_after_database_invalidation(monkeypatch):
+    from ida_pro_mcp import instance_runtime
+    from ida_pro_mcp.instance_runtime import RuntimeIdentity
+
+    fake_idaapi = ModuleType("idaapi")
+    fake_idaapi.Form = SimpleNamespace
+    fake_idaapi.action_handler_t = object
+    fake_idaapi.plugin_t = object
+    fake_idaapi.PLUGIN_KEEP = 0
+    fake_kernwin = ModuleType("ida_kernwin")
+    fake_kernwin.UI_Hooks = object
+    monkeypatch.setitem(sys.modules, "idaapi", fake_idaapi)
+    monkeypatch.setitem(sys.modules, "ida_kernwin", fake_kernwin)
+    monkeypatch.setitem(sys.modules, "ida_netnode", ModuleType("ida_netnode"))
+    monkeypatch.setitem(
+        sys.modules, "idc", SimpleNamespace(get_idb_path=lambda: "b.i64")
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_nalt",
+        SimpleNamespace(
+            get_root_filename=lambda: "b.exe",
+            get_input_file_path=lambda: "b.exe",
+        ),
+    )
+    events = []
+    discovery = ModuleType("ida_pro_mcp.ida_mcp.discovery")
+    discovery.register_instance = lambda **kw: events.append(("register", kw))
+    discovery.unregister_instance = lambda *args: events.append(("unregister", args))
+    monkeypatch.setitem(sys.modules, discovery.__name__, discovery)
+    spec = importlib.util.spec_from_file_location(
+        "_loader_identity_test", installer.IDA_PLUGIN_LOADER
+    )
+    loader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loader)
+    state = RuntimeIdentity()
+    old = state.activate("a.exe", "a.i64")
+    monkeypatch.setattr(instance_runtime, "_runtime", state)
+    instance = loader.MCP()
+    instance.host = "127.0.0.1"
+    instance._listener_port = instance._registered_port = 13337
+    instance._registered_generation = old
+    instance.mcp = object()
+    state.invalidate()
+    instance._database_identity_changed()
+    new = state.activate("b.exe", "b.i64")
+    instance._database_identity_changed()
+    assert [event[0] for event in events] == ["unregister", "register"]
+    assert events[-1][1]["generation"] == new
+    assert instance._registered_port == 13337

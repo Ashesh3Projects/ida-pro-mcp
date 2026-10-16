@@ -31,6 +31,8 @@ class LaunchInstanceResult(TypedDict, total=False):
 
 class InstanceInfo(TypedDict, total=False):
     instance_id: str
+    generation: str
+    identity_version: int
     host: str
     port: int
     pid: int
@@ -42,6 +44,9 @@ class InstanceInfo(TypedDict, total=False):
 
 
 def _get_ida_user_dir() -> str:
+    configured = os.environ.get("IDAUSR", "").split(os.pathsep)[0].strip()
+    if configured:
+        return os.path.expanduser(configured)
     if sys.platform == "win32":
         return os.path.join(os.environ["APPDATA"], "Hex-Rays", "IDA Pro")
     return os.path.join(os.path.expanduser("~"), ".idapro")
@@ -58,7 +63,9 @@ def get_legacy_instances_dir() -> str:
 
 def get_instance_dirs() -> list[str]:
     """Return current and legacy registry directories in preference order."""
-    directories = [get_instances_dir(), get_legacy_instances_dir()]
+    directories = [get_instances_dir()]
+    if not os.environ.get("IDAUSR", "").strip():
+        directories.append(get_legacy_instances_dir())
     result = []
     seen = set()
     for path in directories:
@@ -82,6 +89,7 @@ def register_instance(
     backend: str = "gui",
     instance_id: str = "",
     binary_path: str = "",
+    generation: str = "",
 ) -> str:
     """Write an instance registration file. Returns the file path."""
     info: InstanceInfo = {
@@ -95,6 +103,8 @@ def register_instance(
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "backend": backend,
     }
+    if generation:
+        info.update(generation=generation, identity_version=1)
     instances_dir = get_instances_dir()
     os.makedirs(instances_dir, exist_ok=True)
     file_path = _instance_file_path(port)
@@ -113,13 +123,17 @@ def register_instance(
     return file_path
 
 
-def unregister_instance(port: int) -> bool:
+def unregister_instance(port: int, generation: str = "") -> bool:
     """Remove an instance registration file. Returns True if removed."""
     file_path = _instance_file_path(port)
     try:
+        if generation:
+            with open(file_path, encoding="utf-8") as stream:
+                if json.load(stream).get("generation") != generation:
+                    return False
         os.unlink(file_path)
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -304,14 +318,19 @@ def launch_gui_instance(
     try:
         subprocess.Popen(
             args,
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-            if sys.platform == "win32" else 0,
+            creationflags=subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            if sys.platform == "win32"
+            else 0,
         )
     except Exception as e:
         return {"success": False, "error": f"Failed to launch IDA: {e}"}
 
     if timeout == 0:
-        return {"success": True, "message": "IDA launched, not waiting for registration"}
+        return {
+            "success": True,
+            "message": "IDA launched, not waiting for registration",
+        }
 
     deadline = time.monotonic() + timeout
     new_instance = None

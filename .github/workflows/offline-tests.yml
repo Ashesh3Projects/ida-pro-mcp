@@ -20,7 +20,7 @@ jobs:
       - name: Install reviewed dependencies and test tools
         run: |
           python scripts/bootstrap_unified.py --wheel-dir wheels --install
-          python -m pip install pytest jsonschema "mcp>=1,<2" build
+          python -m pip install pytest jsonschema "mcp==2.3.0" "fastmcp==4.1.0" build
       - name: Run non-IDA tests
         run: python -m pytest -q
       - name: Build wheel

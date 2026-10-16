@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.0.1 - 2026-10-16
+
+- Prepare the explicit-instance migration and its review fixes for integration into main, with matching package, lockfile, IDA plugin, and client manifest versions.
+- Require acknowledged legacy cancellation/drain before releasing bindings; release client Python namespaces and retain failed-close ownership across alias opens.
+- Fix shutdown/open ordering, GUI discovery re-registration, Nexus bootstrap cancellation, and lifecycle diagnostic events.
+- Retain the 4.0 breaking contract: upgrade the plugin, reconnect the MCP client, and rediscover instance IDs together.
+
+## 4.0.0 - Explicit multi-instance routing
+
+- Require a random `instance_id` on every database tool, resource read and output continuation. Remove selected/current instance state, `select_instance`, caller-chosen IDs and implicit GUI-to-headless replacement.
+- Move public stdio/HTTP frontends to FastMCP 4.1.0 and MCP SDK 2.3.0 with modern sessionless and older protocol support.
+- Isolate queues, cancellation, close/drain and cached outputs by exact instance; reject stale generations before IDA execution.
+- Preserve typed tools, Nexus leases/Python, legacy launch modes, profiles and diagnostic commands.
+- Upgrade the plugin and reconnect clients together. Rediscover IDs after frontend restart. Legacy `idb_close` retains a failed save/drain for retry.
+
+
 ## Unreleased
 
 - Enable unsafe tools, including `py_eval` and `py_exec_file`, by default in the legacy headless worker and supervisor. Add `--no-unsafe` to disable them and forward that choice to newly spawned workers.
