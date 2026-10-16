@@ -63,7 +63,7 @@ Separate MCP processes retain separate leases. Within one server, agents using t
 - Legacy headless supervisor: `idalib-mcp --stdio`, including explicit GUI/headless modes.
 - Legacy mode retains the advertised IDA 8.3+ floor; the new unified runtime requires 9.4+.
 - Run offline tests with `python -m pytest`. Run IDA tests separately with `ida-mcp-test <copied-fixture>`.
-- Runtime pins: FastMCP 4.1.0, MCP SDK 2.3.0, ida-mcp 20260929.0.1, ida-nexus 0.13.0, ida-domain 0.5.1, ZeroMCP 1.10.3. See [CHANGELOG](CHANGELOG.md) and [implementation design](docs/superpowers/specs/2026-09-30-unified-ida-mcp-design.md).
+- Runtime pins: FastMCP 4.1.0, MCP SDK 2.3.0, ida-mcp 20260929.0.1, ida-nexus 0.13.0, ida-domain 0.5.1, ZeroMCP 1.10.3. See [CHANGELOG](CHANGELOG.md), [implementation design](docs/superpowers/specs/2026-10-16-explicit-instance-routing-design.md), and [local validation results and limits](docs/explicit-instance-validation.md).
 
 Version 4.0 is a breaking tool-contract upgrade: restart IDA after installing the new plugin, reconnect the MCP client to refresh schemas, then obtain fresh instance IDs. Backends without generation support are reported as incompatible. The remaining documentation describes the legacy launch workflows and typed APIs; every database-specific example requires `instance_id`.
 
