@@ -130,3 +130,7 @@ This is a local prepared implementation, not a release: no push, PR, merge,
 publish, or normal installation was performed. When installing 4.0 later,
 restart IDA and reconnect the MCP client to reload schemas, then discover fresh
 IDs. The managed worktree and branch are preserved.
+
+Selected logs are preserved locally under `.pytest-tmp-routing-evidence/`.
+Removal of this plan's ignored `.superpowers/sdd/` scratch directory was blocked
+by execution policy, so it was retained; no cleanup bypass was attempted.
