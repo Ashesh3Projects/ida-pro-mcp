@@ -99,7 +99,8 @@ def backend_server():
         "host": "127.0.0.1",
         "port": server.server_port,
         "token": "test-secret",
-        "version": 1,
+        "version": 2,
+        "generation": "a" * 16,
     }
     try:
         yield backend
@@ -146,9 +147,9 @@ def test_native_envelope_bootstrap_once_and_unique_client_ids():
     async def scenario(backend):
         manager = Manager({"A": backend})
         first, second = UnifiedBridge(manager), UnifiedBridge(manager)
-        assert await first.call_tool("list_funcs", {}) == backend.result
-        assert await first.call_tool("list_funcs", {}) == backend.result
-        assert await second.call_tool("list_funcs", {}) == backend.result
+        assert await first.call_tool("list_funcs", {}, "A") == backend.result
+        assert await first.call_tool("list_funcs", {}, "A") == backend.result
+        assert await second.call_tool("list_funcs", {}, "A") == backend.result
         assert len(manager.bootstraps) == 2
         assert all(item[2]["persist_globals"] is True for item in manager.bootstraps)
         assert len({item["id"] for item in backend.calls}) == 3
@@ -169,7 +170,7 @@ def test_cancellation_pins_original_target_and_waits_for_unwind():
         first.block = True
         manager = Manager({"A": first, "B": second})
         bridge = UnifiedBridge(manager)
-        task = asyncio.create_task(bridge.call_tool("py_eval", {"code": "slow()"}))
+        task = asyncio.create_task(bridge.call_tool("py_eval", {"code": "slow()"}, "A"))
         assert await asyncio.to_thread(first.entered.wait, 3)
         manager.current = "B"
         task.cancel()
@@ -193,7 +194,7 @@ def test_failed_mutation_is_not_replayed():
     with backend_server() as backend:
         backend.fail = True
         with pytest.raises(Exception, match="503"):
-            asyncio.run(UnifiedBridge(Manager({"A": backend})).call_tool("patch", {}))
+            asyncio.run(UnifiedBridge(Manager({"A": backend})).call_tool("patch", {}, "A"))
         assert len(backend.calls) == 1
 
 
@@ -222,7 +223,7 @@ def test_output_is_owned_by_original_target_and_has_bounded_continuation():
                 }
             },
         }
-        result = await bridge.call_tool("strings", {})
+        result = await bridge.call_tool("strings", {}, "A")
         assert "http://" not in json.dumps(result)
         output_id = result["_meta"]["ida_mcp"]["output_id"]
         manager.current = "B"
@@ -248,7 +249,7 @@ def test_close_waits_for_bridge_call_and_only_releases_owned_context():
     async def scenario(backend):
         backend.block = True
         bridge = UnifiedBridge(Manager({"A": backend}))
-        task = asyncio.create_task(bridge.call_tool("py_eval", {}))
+        task = asyncio.create_task(bridge.call_tool("py_eval", {}, "A"))
         assert await asyncio.to_thread(backend.entered.wait, 3)
         close = asyncio.create_task(asyncio.to_thread(bridge.release_target, "A"))
         assert await asyncio.to_thread(backend.cancel_received.wait, 3)
@@ -260,7 +261,7 @@ def test_close_waits_for_bridge_call_and_only_releases_owned_context():
         assert backend.released == [
             {
                 "client_id": bridge.client_id,
-                "_meta": {"ida_pro_mcp_client": bridge.client_id},
+                "_meta": {"ida_pro_mcp_client": bridge.client_id, "ida_pro_mcp_generation": "a" * 16},
             }
         ]
         with pytest.raises(ValueError, match="closed"):
@@ -285,14 +286,14 @@ def test_manager_close_preserves_peer_and_reopen_gets_fresh_bridge_session():
         manager_type = bridge_manager_class(LifecycleManager)
         first = manager_type(targets={"A": backend})
         second = manager_type(targets={"A": backend})
-        await first.unified_bridge.call_tool("py_eval", {})
-        await second.unified_bridge.call_tool("py_eval", {})
+        await first.unified_bridge.call_tool("py_eval", {}, "A")
+        await second.unified_bridge.call_tool("py_eval", {}, "A")
         first.close_database("A")
         assert len(backend.released) == 1
         assert backend.released[0]["client_id"] != second.unified_bridge.client_id
-        await second.unified_bridge.call_tool("py_eval", {})
+        await second.unified_bridge.call_tool("py_eval", {}, "A")
         first.open_database("A", set_current=True)
-        await first.unified_bridge.call_tool("py_eval", {})
+        await first.unified_bridge.call_tool("py_eval", {}, "A")
         assert len(first.bootstraps) == 2
         first.shutdown()
         second.shutdown()
@@ -364,7 +365,7 @@ def test_close_retains_nexus_lease_until_backend_drain_acknowledges():
 
     with backend_server() as backend:
         manager = bridge_manager_class(LifecycleManager)(targets={"A": backend})
-        asyncio.run(manager.unified_bridge.call_tool("py_eval", {}))
+        asyncio.run(manager.unified_bridge.call_tool("py_eval", {}, "A"))
         backend.release_fail = True
         with pytest.raises(RuntimeError, match="503"):
             manager.close_database("A")
@@ -381,7 +382,7 @@ def test_cancel_after_transport_loss_waits_for_session_drain_ack():
     async def scenario(backend):
         backend.block = backend.fail = backend.release_block = True
         bridge = UnifiedBridge(Manager({"A": backend}))
-        task = asyncio.create_task(bridge.call_tool("py_eval", {}))
+        task = asyncio.create_task(bridge.call_tool("py_eval", {}, "A"))
         assert await asyncio.to_thread(backend.entered.wait, 3)
         task.cancel()
         assert await asyncio.to_thread(backend.cancel_received.wait, 3)
@@ -419,7 +420,7 @@ def test_startup_resolution_does_not_hold_bridge_lock():
                 return "A"
 
         bridge = UnifiedBridge(StartupManager({"A": backend}))
-        assert asyncio.run(bridge.call_tool("py_eval", {})) == backend.result
+        assert asyncio.run(bridge.call_tool("py_eval", {}, "A")) == backend.result
 
 
 def test_bootstrap_cancellation_retries_until_operation_registers():
@@ -449,7 +450,7 @@ def test_bootstrap_cancellation_retries_until_operation_registers():
                 return True
 
         manager = DelayedManager({"A": backend})
-        task = asyncio.create_task(UnifiedBridge(manager).call_tool("py_eval", {}))
+        task = asyncio.create_task(UnifiedBridge(manager).call_tool("py_eval", {}, "A"))
         assert await asyncio.to_thread(entered.wait, 1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

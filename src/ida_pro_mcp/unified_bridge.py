@@ -19,6 +19,8 @@ from typing import Any
 from urllib.parse import quote
 
 from .runtime_identity import PACKAGE_FINGERPRINT
+from .instance_contract import RoutingError, require_instance_id
+from .instance_router import finish_cleanup
 
 MAX_OUTPUT_CHARS = 32_000
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
@@ -41,10 +43,11 @@ class Endpoint:
     host: str
     port: int
     token: str = field(repr=False)
+    generation: str
 
     @classmethod
     def parse(cls, value: Any) -> Endpoint:
-        if not isinstance(value, dict) or value.get("version") != 1:
+        if not isinstance(value, dict) or value.get("version") != 2:
             raise ValueError("unsupported IDA bridge protocol")
         if value.get("host") != "127.0.0.1":
             raise ValueError("IDA bridge must bind IPv4 loopback")
@@ -57,7 +60,7 @@ class Endpoint:
             raise ValueError("invalid IDA bridge port")
         if not isinstance(token, str) or not token or any(c in token for c in "\r\n"):
             raise ValueError("invalid IDA bridge credential")
-        return cls("127.0.0.1", port, token)
+        return cls("127.0.0.1", port, token, require_instance_id(value.get("generation")))
 
 
 @dataclass(eq=False)
@@ -73,11 +76,12 @@ class Invocation:
 
 
 class UnifiedBridge:
-    def __init__(self, manager: Any):
+    def __init__(self, manager: Any, *, endpoints=None, raw_outputs=False):
         self.manager = manager
         self.client_id = uuid.uuid4().hex
         self._lock = threading.RLock()
-        self._endpoints: dict[str, Endpoint] = {}
+        self._endpoints: dict[str, Endpoint] = dict(endpoints or {})
+        self._raw_outputs = raw_outputs
         self._clients: dict[str, str] = {}
         self._bootstrap_locks: dict[str, threading.Lock] = {}
         self._active: set[Invocation] = set()
@@ -101,6 +105,7 @@ class UnifiedBridge:
                 headers={
                     "Authorization": f"Bearer {endpoint.token}",
                     "Content-Type": "application/json",
+                    "X-IDA-MCP-Generation": endpoint.generation,
                 },
             )
             response = connection.getresponse()
@@ -126,7 +131,7 @@ class UnifiedBridge:
         request = {
             "jsonrpc": "2.0",
             "method": method,
-            "params": {**params, "_meta": {"ida_pro_mcp_client": client_id}},
+            "params": {**params, "_meta": {"ida_pro_mcp_client": client_id, "ida_pro_mcp_generation": endpoint.generation}},
         }
         if request_id is not None:
             request["id"] = request_id
@@ -137,6 +142,9 @@ class UnifiedBridge:
         if not isinstance(response, dict) or response.get("id") != request_id:
             raise ValueError("IDA bridge returned a mismatched response id")
         if "error" in response:
+            code = response["error"].get("data", {}).get("error_code")
+            if code:
+                raise RoutingError(code, response["error"].get("message", code))
             raise RuntimeError(
                 str(response["error"].get("message", "IDA bridge RPC failed"))
             )
@@ -202,7 +210,8 @@ class UnifiedBridge:
                     result.get("content"), list
                 ):
                     raise ValueError("IDA bridge returned an invalid tool result")
-                result = self._own_output(result, target, invocation.endpoint)
+                if not self._raw_outputs:
+                    result = self._own_output(result, target, invocation.endpoint)
             return result
         finally:
             with self._lock:
@@ -245,9 +254,11 @@ class UnifiedBridge:
             self.release_target(invocation.target)
 
     async def request(
-        self, method: str, params: dict, instance_id: str | None = None
+        self, method: str, params: dict, instance_id: str
     ) -> Any:
-        invocation = Invocation()
+        if not isinstance(instance_id, str) or not instance_id:
+            raise RoutingError("INSTANCE_ID_REQUIRED", "Explicit bridge target is required")
+        invocation = Invocation(target=instance_id)
         with self._lock:
             if self._shutdown:
                 raise ValueError("IDA bridge is closed")
@@ -261,19 +272,13 @@ class UnifiedBridge:
             cleanup = asyncio.create_task(
                 asyncio.to_thread(self._cancel_and_wait, invocation)
             )
-            # Repeated cancellation cannot abandon an IDA operation or its lease.
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    pass
-            cleanup.result()
+            await finish_cleanup(cleanup)
             with suppress(BaseException):
                 await worker
             raise
 
     async def call_tool(
-        self, name: str, arguments: dict, instance_id: str | None = None
+        self, name: str, arguments: dict, instance_id: str
     ) -> dict:
         return await self.request(
             "tools/call", {"name": name, "arguments": arguments}, instance_id
@@ -334,7 +339,7 @@ class UnifiedBridge:
     def release_target(self, target: str) -> None:
         with self._lock:
             self._closed.add(target)
-            active = [call for call in self._active if call.target in (None, target)]
+            active = [call for call in self._active if call.target == target]
         for call in active:
             self._cancel(call)
         for call in active:
@@ -396,6 +401,17 @@ class UnifiedBridge:
                     )
                 self._clients[target] = uuid.uuid4().hex
             self._closed.discard(target)
+
+    async def download_output(self, output_id: str, instance_id: str) -> str:
+        target = self.manager.resolve_instance_id(instance_id)
+        with self._lock:
+            if self._shutdown or target in self._closed:
+                raise RoutingError("INSTANCE_CLOSED", "Output belongs to a closed database")
+            endpoint = self._endpoints.get(target)
+        if endpoint is None:
+            raise RoutingError("OUTPUT_EXPIRED", "Output endpoint is no longer available")
+        data = await asyncio.to_thread(self._http, endpoint, "GET", f"/output/{quote(output_id, safe='')}.json")
+        return data.decode("utf-8")
 
 
 def bridge_manager_class(base: type) -> type:
