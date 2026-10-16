@@ -415,5 +415,3 @@ def test_bootstrap_cancellation_retries_until_operation_registers():
 
     with backend_server() as backend:
         asyncio.run(scenario(backend))
-
-

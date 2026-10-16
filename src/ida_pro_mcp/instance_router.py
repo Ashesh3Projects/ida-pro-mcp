@@ -187,6 +187,8 @@ class InstanceRouter:
                     slot.session = session
                     session = None
                     self.registry.set_state(binding, "ready")
+                elif slot.session is session:
+                    session = None
             return self.registry.describe(binding)
         finally:
             if session is not None:

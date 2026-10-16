@@ -273,6 +273,9 @@ class MCP(idaapi.plugin_t):
     DEFAULT_PORT = 13337
 
     def init(self):
+        _configure_runtime_paths()
+        from ida_pro_mcp.ida_mcp.instance_hooks import install_instance_hooks
+        install_instance_hooks()
         self._nexus_plugin = _start_nexus()
         hotkey = MCP.wanted_hotkey.replace("-", "+")
         if __import__("sys").platform == "darwin":
@@ -340,7 +343,9 @@ class MCP(idaapi.plugin_t):
         from ida_pro_mcp.ida_mcp.instance_hooks import install_instance_hooks, activate_database
         from ida_pro_mcp.ida_mcp.instance_dispatch import install_instance_dispatch
         install_instance_hooks(self._database_identity_changed)
-        activate_database()
+        from ida_pro_mcp.instance_runtime import runtime_identity
+        if not runtime_identity().snapshot():
+            activate_database()
         install_instance_dispatch(MCP_SERVER)
 
         port = self.port

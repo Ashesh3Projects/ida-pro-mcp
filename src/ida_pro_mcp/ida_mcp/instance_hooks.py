@@ -6,6 +6,7 @@ import ida_loader
 import ida_nalt
 
 from ida_pro_mcp.instance_runtime import runtime_identity
+from ida_pro_mcp.nexus_gui_lifecycle import refresh_gui_service
 
 _hooks = None
 _on_change = None
@@ -18,12 +19,14 @@ def activate_database():
         runtime_identity().activate(binary, path)
     if _on_change is not None:
         _on_change()
+    refresh_gui_service()
 
 
 def invalidate_database():
     runtime_identity().invalidate()
     if _on_change is not None:
         _on_change()
+    refresh_gui_service()
 
 
 def install_instance_hooks(on_change=None):
@@ -34,6 +37,9 @@ def install_instance_hooks(on_change=None):
         return
 
     class UI(ida_kernwin.UI_Hooks):
+        def ready_to_run(self):
+            refresh_gui_service()
+
         def initing_database(self):
             invalidate_database()
 
@@ -49,3 +55,4 @@ def install_instance_hooks(on_change=None):
         hook.hook()
     if not runtime_identity().snapshot():
         activate_database()
+    refresh_gui_service()

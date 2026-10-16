@@ -114,10 +114,6 @@ def idb_open(
         int,
         "Minimum idle TTL in seconds before the headless worker self-exits.",
     ] = 600,
-    preferred_session_id: Annotated[
-        str,
-        "Preferred session ID (auto-generated if empty). Ignored if the file is already open.",
-    ] = "",
 ) -> IdalibOpenResult:
     """Open a binary, activate it, and warm up subsystems in one call."""
 
@@ -130,7 +126,6 @@ def idb_open(
                 build_caches,
                 init_hexrays,
                 idle_ttl_sec,
-                preferred_session_id,
             ),
             label="idb_open",
         )
@@ -142,7 +137,6 @@ def idb_open(
         opened_session_id = manager.open_binary(
             resolved_path,
             run_auto_analysis=run_auto_analysis,
-            session_id=preferred_session_id or None,
         )
         session = manager.activate_session(opened_session_id)
         warmup: ServerWarmupResult | None = None
@@ -153,7 +147,7 @@ def idb_open(
                 init_hexrays=init_hexrays,
             )
         _LIFECYCLE.set_idle_ttl(float(idle_ttl_sec), time.monotonic() - load_started_at)
-        if _REGISTERED_PORT is None and _BOUND_HOST and _BOUND_PORT:
+        if _BOUND_HOST and _BOUND_PORT:
             _register_in_discovery(_BOUND_HOST, _BOUND_PORT, session.input_path)
         return {
             "success": True,

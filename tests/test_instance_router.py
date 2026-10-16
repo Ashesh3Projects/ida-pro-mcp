@@ -141,3 +141,18 @@ def test_replacement_does_not_receive_stale_request():
         assert p.calls == []
         await router.shutdown()
     asyncio.run(scenario())
+
+
+def test_repeated_open_of_provider_owned_session_does_not_close_it():
+    async def scenario():
+        p, router, a, _ = await setup()
+        await router.request(a, "tools/call", PARAMS)
+        existing = p.sessions[0]
+        async def reuse(path, options):
+            return existing
+        p.open_path = reuse
+        opened = await router.open_database("/samples/A.exe")
+        assert opened["instance_id"] == a
+        assert not existing.closed
+        await router.shutdown()
+    asyncio.run(scenario())
