@@ -20,6 +20,9 @@ classifiers = [
 ]
 dependencies = [
     "anyio>=4.9",
+    "fastmcp==4.1.0",
+    "mcp==2.3.0",
+    "jsonschema>=4.20.0",
     "idapro>=0.0.10",
     "tomli-w>=1.0.0",
     "ida-mcp==20260929.0.1",
@@ -32,7 +35,6 @@ dependencies = [
 dev = [
     "coverage>=7.13.4",
     "jsonschema>=4.0",
-    "mcp>=1.0,<2",
     "pytest>=9.0.3",
 ]
 

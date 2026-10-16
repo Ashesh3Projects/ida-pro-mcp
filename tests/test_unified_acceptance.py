@@ -61,8 +61,7 @@ def test_unified_http_discovery_without_ida(tmp_path):
     import socket
     import time
 
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
+    from fastmcp import Client
 
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -94,26 +93,13 @@ def test_unified_http_discovery_without_ida(tmp_path):
                     time.sleep(0.05)
 
             async def check():
-                async with streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (
-                    read,
-                    write,
-                    _,
-                ):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        tools = await session.list_tools()
-                        names = {tool.name for tool in tools.tools}
-                        assert len(names) == 73
-                        assert {
-                            "reference",
-                            "decompile",
-                            "execute_python",
-                            "read_output",
-                        } <= names
-                        result = await session.call_tool(
-                            "reference", {"query": "decompile"}
-                        )
-                        assert not result.isError
+                async with Client(f"http://127.0.0.1:{port}/mcp") as client:
+                    tools = await client.list_tools()
+                    names = {tool.name for tool in tools}
+                    assert len(names) == 75
+                    assert {"reference", "decompile", "execute_python", "read_output", "list_instances"} <= names
+                    result = await client.call_tool_mcp("reference", {"query": "decompile"})
+                    assert not result.is_error
 
             asyncio.run(check())
         finally:

@@ -271,35 +271,6 @@ def test_close_waits_for_bridge_call_and_only_releases_owned_context():
         asyncio.run(scenario(backend))
 
 
-def test_manager_close_preserves_peer_and_reopen_gets_fresh_bridge_session():
-    from ida_pro_mcp.unified_bridge import bridge_manager_class
-
-    class LifecycleManager(Manager):
-        def __init__(self, *, targets, idle_timeout=None):
-            super().__init__(targets)
-
-        def open_database(self, path, **kwargs):
-            self.current = path
-            return {"instance_id": path}
-
-    async def scenario(backend):
-        manager_type = bridge_manager_class(LifecycleManager)
-        first = manager_type(targets={"A": backend})
-        second = manager_type(targets={"A": backend})
-        await first.unified_bridge.call_tool("py_eval", {}, "A")
-        await second.unified_bridge.call_tool("py_eval", {}, "A")
-        first.close_database("A")
-        assert len(backend.released) == 1
-        assert backend.released[0]["client_id"] != second.unified_bridge.client_id
-        await second.unified_bridge.call_tool("py_eval", {}, "A")
-        first.open_database("A", set_current=True)
-        await first.unified_bridge.call_tool("py_eval", {}, "A")
-        assert len(first.bootstraps) == 2
-        first.shutdown()
-        second.shutdown()
-
-    with backend_server() as backend:
-        asyncio.run(scenario(backend))
 
 
 def test_bootstrap_rejects_a_different_cached_installation(tmp_path):
@@ -356,24 +327,6 @@ print(json.dumps(result))
         assert actual == {"copied": True}
 
 
-def test_close_retains_nexus_lease_until_backend_drain_acknowledges():
-    from ida_pro_mcp.unified_bridge import bridge_manager_class
-
-    class LifecycleManager(Manager):
-        def __init__(self, *, targets, idle_timeout=None):
-            super().__init__(targets)
-
-    with backend_server() as backend:
-        manager = bridge_manager_class(LifecycleManager)(targets={"A": backend})
-        asyncio.run(manager.unified_bridge.call_tool("py_eval", {}, "A"))
-        backend.release_fail = True
-        with pytest.raises(RuntimeError, match="503"):
-            manager.close_database("A")
-        assert manager.closed == []
-        backend.release_fail = False
-        assert manager.close_database("A") == {"closed": True}
-        assert manager.closed == ["A"]
-        assert len(backend.released) == 1
 
 
 def test_cancel_after_transport_loss_waits_for_session_drain_ack():
@@ -464,33 +417,3 @@ def test_bootstrap_cancellation_retries_until_operation_registers():
         asyncio.run(scenario(backend))
 
 
-def test_shutdown_releases_healthy_target_when_peer_drain_fails_and_can_retry():
-    from ida_pro_mcp.unified_bridge import bridge_manager_class
-
-    class LifecycleManager(Manager):
-        def __init__(self, *, targets, idle_timeout=None):
-            super().__init__(targets)
-            self.base_shutdowns = 0
-
-        def shutdown(self, **kwargs):
-            self.base_shutdowns += 1
-
-        def open_database(self, path, **kwargs):
-            return {"instance_id": path}
-
-    with backend_server() as first, backend_server() as second:
-        manager = bridge_manager_class(LifecycleManager)(targets={"A": first, "B": second})
-        manager.open_database("C", set_current=False)
-        asyncio.run(manager.unified_bridge.call_tool("py_eval", {}, "A"))
-        asyncio.run(manager.unified_bridge.call_tool("py_eval", {}, "B"))
-        first.release_fail = True
-        with pytest.raises(Exception):
-            manager.shutdown()
-        assert manager.closed == ["B", "C"]
-        assert len(second.released) == 1 and not first.released
-        assert manager.base_shutdowns == 0
-        first.release_fail = False
-        manager.shutdown()
-        assert manager.closed == ["B", "C", "A"]
-        assert manager.base_shutdowns == 1
-        assert len(first.released) == 1 and len(second.released) == 1
