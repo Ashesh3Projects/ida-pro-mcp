@@ -36,6 +36,10 @@ class FakeSession:
                 raise asyncio.CancelledError()
             if method == "output/read":
                 return {"text": self.provider.outputs.get(params["output_id"], '{"result":"complete"}')}
+            if method == "resources/read":
+                return {"contents": [{"uri": params["uri"], "mimeType": "application/json", "text": json.dumps({"backend": self.identity.key})}]}
+            if self.provider.result is not None:
+                return deepcopy(self.provider.result)
             value = {"backend": self.identity.key}
             return {"content": [{"type": "text", "text": json.dumps(value)}], "structuredContent": value, "isError": False}
         finally:
@@ -66,6 +70,7 @@ class FakeProvider:
         self.cancelled = []
         self.opens = []
         self.outputs = {}
+        self.result = None
         self.fail_close = set()
         self.gates = {}
         self.entered = {}

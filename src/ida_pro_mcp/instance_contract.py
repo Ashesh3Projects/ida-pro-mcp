@@ -7,6 +7,7 @@ import re
 import secrets
 import threading
 from typing import Protocol
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 
 class RoutingError(ValueError):
@@ -37,6 +38,14 @@ def require_instance_id(value: object) -> str:
             "instance_id must be the exact 16-character ID returned by this server.",
         )
     return value
+
+
+def split_instance_uri(uri: str) -> tuple[str, str]:
+    parts = urlsplit(uri)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if set(query) != {"instance_id"} or len(query["instance_id"]) != 1:
+        raise RoutingError("INSTANCE_ID_REQUIRED", "Resource URI requires exactly one instance_id query parameter.")
+    return urlunsplit(parts._replace(query="")), require_instance_id(query["instance_id"][0])
 
 
 @dataclass(frozen=True)

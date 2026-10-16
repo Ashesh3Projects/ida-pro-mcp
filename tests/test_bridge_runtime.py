@@ -159,7 +159,9 @@ def test_malformed_optional_context_is_a_jsonrpc_error(runtime):
 
 
 def test_output_requires_token_and_configuration_is_not_exposed(runtime):
-    runtime[1]._cache_output("a123", {"complete": "value"})
+    from ida_pro_mcp.instance_runtime import generation_context
+    with generation_context(runtime[3]["generation"]):
+        runtime[1]._cache_output("a123", {"complete": "value"})
     status, body = request(runtime, "GET", "/output/a123.json")
     assert status == 200
     assert json.loads(body) == {"complete": "value"}

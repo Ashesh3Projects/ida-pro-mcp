@@ -127,7 +127,8 @@ class _Bridge:
                 match = re.fullmatch(
                     r"/output/([a-f0-9-]+)\.json", urlsplit(self.path).path
                 )
-                data = rpc.get_cached_output(match[1]) if match else None
+                with generation_context(generation):
+                    data = rpc.get_cached_output(match[1]) if match else None
                 if data is None:
                     self.send_error(404, "Not Found")
                     return

@@ -10,8 +10,9 @@ import os
 
 import anyio
 
-from .instance_contract import BackendProvider, BackendSession, InstanceBinding, Invocation, RoutingError
+from .instance_contract import BackendProvider, BackendSession, InstanceBinding, Invocation, RoutingError, split_instance_uri
 from .instance_registry import InstanceRegistry
+from .output_store import OutputStore
 
 
 @dataclass
@@ -42,7 +43,7 @@ class InstanceRouter:
         self._slots: dict[str, _Slot] = {}
         self._opens: dict[str, asyncio.Task] = {}
         self._shutdown = False
-        self._output_store = None
+        self._output_store = OutputStore()
 
     def _check_running(self):
         if self._shutdown:
@@ -103,7 +104,14 @@ class InstanceRouter:
                 if invocation.cancelled.is_set():
                     raise asyncio.CancelledError()
                 slot.phases[invocation] = "executing"
-                return await session.request(invocation, method, params)
+                if method == "output/read":
+                    expected = params.pop("expected_generation", None)
+                    if expected != session.runtime_generation:
+                        raise RoutingError("INSTANCE_CHANGED", "Cached output's backend generation changed")
+                result = await session.request(invocation, method, params)
+                if method == "tools/call":
+                    result = self._own_output(result, slot)
+                return result
         finally:
             slot.calls.pop(invocation, None)
             slot.phases.pop(invocation, None)
@@ -133,6 +141,38 @@ class InstanceRouter:
         except asyncio.CancelledError:
             await finish_cleanup(asyncio.create_task(self._cancel(slot, invocation, worker)))
             raise
+
+    def _own_output(self, result, slot):
+        result = deepcopy(result)
+        metadata = result.setdefault("_meta", {}).setdefault("ida_mcp", {})
+        metadata["instance_id"] = slot.binding.instance_id
+        backend_id = metadata.get("output_id")
+        if isinstance(backend_id, str):
+            output_id = self._output_store.remember(slot.binding, slot.session.runtime_generation, backend_id, slot.binding.instance_id)
+            metadata["output_id"] = output_id
+            metadata.pop("download_url", None)
+            hint = f'Output truncated. Use read_output(instance_id="{slot.binding.instance_id}", output_id="{output_id}", offset=0, limit=32000).'
+            metadata["download_hint"] = hint
+            result["content"] = result.get("content", [])[:1] + [{"type": "text", "text": hint}]
+        return result
+
+    async def read_output(self, instance_id: str, output_id: str, offset: int = 0, limit: int = 32000):
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 32000:
+            raise ValueError("offset must be nonnegative and limit must be between 1 and 32000")
+        output = self._output_store.lookup(instance_id, output_id)
+        result = await self.request(instance_id, "output/read", {
+            "output_id": output.backend_output_id, "expected_generation": output.runtime_generation})
+        text = result["text"]
+        end = min(offset + limit, len(text))
+        return {"instance_id": instance_id, "output_id": output_id, "offset": offset,
+                "text": text[offset:end], "total_chars": len(text), "next_offset": end if end < len(text) else None}
+
+    async def read_resource(self, uri: str):
+        backend_uri, instance_id = split_instance_uri(uri)
+        result = deepcopy(await self.request(instance_id, "resources/read", {"uri": backend_uri}))
+        for content in result.get("contents", []):
+            content["uri"] = uri
+        return result
 
     async def _open(self, path, options):
         session = await self.provider.open_path(path, options)

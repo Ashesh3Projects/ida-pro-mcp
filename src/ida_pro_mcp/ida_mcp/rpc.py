@@ -20,6 +20,7 @@ MCP_SERVER = McpServer("ida-pro-mcp", extensions=MCP_EXTENSIONS)
 OUTPUT_LIMIT_MAX_CHARS = 50000
 OUTPUT_CACHE_MAX_SIZE = 100
 _output_cache: dict[str, Any] = {}
+_output_generations: dict[str, str | None] = {}
 _DOWNLOAD_BASE_URL_DEFAULT = "http://127.0.0.1:13337"
 
 
@@ -115,6 +116,10 @@ def _truncate_value(value: Any, depth: int = 0) -> Any:
 
 def _build_download_meta(output_id: str, total_chars: int) -> dict:
     download_url = f"{get_download_base_url()}/output/{output_id}.json"
+    from ida_pro_mcp.instance_runtime import expected_generation
+    generation = expected_generation()
+    if generation:
+        download_url += f"?instance_id={generation}"
     return {
         "output_truncated": True,
         "total_chars": total_chars,
@@ -125,6 +130,9 @@ def _build_download_meta(output_id: str, total_chars: int) -> dict:
 
 
 def get_cached_output(output_id: str) -> Optional[Any]:
+    from ida_pro_mcp.instance_runtime import expected_generation
+    if _output_generations.get(output_id) != expected_generation():
+        return None
     return _output_cache.get(output_id)
 
 
@@ -132,7 +140,10 @@ def _cache_output(output_id: str, data: Any) -> None:
     if len(_output_cache) >= OUTPUT_CACHE_MAX_SIZE:
         oldest_key = next(iter(_output_cache))
         del _output_cache[oldest_key]
+        _output_generations.pop(oldest_key, None)
     _output_cache[output_id] = data
+    from ida_pro_mcp.instance_runtime import expected_generation
+    _output_generations[output_id] = expected_generation()
 
 
 def _limit_output_response(response: dict) -> dict:

@@ -5,22 +5,12 @@ import json
 import secrets
 import threading
 import time
-from urllib.parse import parse_qs, urlsplit, urlunsplit
-
-from ida_pro_mcp.instance_contract import RoutingError, require_instance_id
+from ida_pro_mcp.instance_contract import RoutingError, require_instance_id, split_instance_uri
 from ida_pro_mcp.instance_runtime import expected_generation, generation_context, runtime_identity
 
 from .execution_context import bridge_context
 
 _GLOBAL_TOOLS = {"list_instances", "idb_open", "idb_list"}
-
-
-def split_instance_uri(uri: str) -> tuple[str, str]:
-    parts = urlsplit(uri)
-    query = parse_qs(parts.query, keep_blank_values=True)
-    if set(query) != {"instance_id"} or len(query["instance_id"]) != 1:
-        raise RoutingError("INSTANCE_ID_REQUIRED", "Resource URI requires exactly one instance_id query parameter.")
-    return urlunsplit(parts._replace(query="")), require_instance_id(query["instance_id"][0])
 
 
 def install_instance_dispatch(server) -> None:
