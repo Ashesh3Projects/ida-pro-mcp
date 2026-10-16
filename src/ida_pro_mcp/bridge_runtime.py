@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from .runtime_identity import PACKAGE_FINGERPRINT
+from .instance_contract import RoutingError, require_instance_id
+from .instance_runtime import runtime_identity as database_identity, generation_context
 
 _bridge = None
 _start_lock = threading.Lock()
@@ -33,6 +35,8 @@ def _load_runtime():
     # Never import top-level ida_mcp: that name belongs to the official adapter.
     package = importlib.import_module("ida_pro_mcp.ida_mcp")
     context = importlib.import_module("ida_pro_mcp.ida_mcp.execution_context")
+    hooks = importlib.import_module("ida_pro_mcp.ida_mcp.instance_hooks")
+    hooks.install_instance_hooks()
     return package.rpc, context
 
 
@@ -114,6 +118,12 @@ class _Bridge:
                 if self._has_unexpected_body():
                     self.send_error(400, "Request body is not allowed")
                     return
+                try:
+                    generation = require_instance_id(self.headers.get("X-IDA-MCP-Generation"))
+                    database_identity().check(generation)
+                except RoutingError as error:
+                    self.send_error(409, str(error))
+                    return
                 match = re.fullmatch(
                     r"/output/([a-f0-9-]+)\.json", urlsplit(self.path).path
                 )
@@ -135,11 +145,17 @@ class _Bridge:
         self.thread.start()
 
     def descriptor(self):
+        identity = database_identity().snapshot()
+        if not identity:
+            raise RoutingError("INSTANCE_CLOSED", "No database is open for this bridge.")
         return {
             "host": "127.0.0.1",
             "port": self.http.server_port,
             "token": self.token,
-            "version": 1,
+            "version": 2,
+            "generation": identity["generation"],
+            "idb_path": identity["idb_path"],
+            "binary_path": identity["binary_path"],
         }
 
     def close(self):
@@ -215,6 +231,15 @@ class _Bridge:
         ):
             if not isinstance(client, str) or not client or len(client) > 256:
                 return error(-32602, "Missing or invalid bridge client context")
+        generation = None
+        if method in ("tools/call", "resources/read"):
+            try:
+                generation = require_instance_id(meta.get("ida_pro_mcp_generation"))
+                database_identity().check(generation)
+            except RoutingError as exc:
+                response = error(-32602, str(exc))
+                response["error"]["data"] = {"error_code": exc.code}
+                return response
         if method == "bridge/release_session":
             if params.get("client_id") != client:
                 return error(-32602, "Release must match the request client context")
@@ -267,7 +292,7 @@ class _Bridge:
         try:
             internal = {**request, "id": key} if "id" in request else request
             if client:
-                with self.context.bridge_context(client, event):
+                with self.context.bridge_context(client, event), generation_context(generation):
                     with self.lock:
                         self.clients.add(client)
                     response = registry.dispatch(internal)

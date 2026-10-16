@@ -74,6 +74,8 @@ _BOUND_PORT: int = 0
 def _register_in_discovery(host: str, port: int, input_path: Path) -> None:
     global _REGISTERED_PORT
     try:
+        from ida_pro_mcp.instance_runtime import runtime_identity
+        identity = runtime_identity().snapshot()
         register_instance(
             host=host,
             port=port,
@@ -82,6 +84,8 @@ def _register_in_discovery(host: str, port: int, input_path: Path) -> None:
             binary_path=str(input_path),
             idb_path=str(input_path),
             backend="worker",
+            instance_id=identity["instance_id"],
+            generation=identity["generation"],
         )
         _REGISTERED_PORT = port
         logger.info("Registered idalib worker in discovery (port %d)", port)
@@ -179,6 +183,8 @@ def idb_list() -> IdalibListResult:
 
 def _install_dispatch_hook() -> None:
     """Wrap the registry dispatcher so every request bumps the watchdog timer."""
+    from ida_pro_mcp.ida_mcp.instance_dispatch import install_instance_dispatch
+    install_instance_dispatch(MCP_SERVER)
     original = MCP_SERVER.registry.dispatch
 
     def touching_dispatch(request):

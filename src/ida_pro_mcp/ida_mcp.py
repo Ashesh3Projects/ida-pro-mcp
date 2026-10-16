@@ -317,7 +317,7 @@ class MCP(idaapi.plugin_t):
         if port is not None:
             try:
                 from ida_pro_mcp.ida_mcp.discovery import unregister_instance
-                unregister_instance(port)
+                unregister_instance(port, getattr(self, "_registered_generation", ""))
             except Exception as e:
                 print(f"[MCP] Instance unregistration failed: {e}")
             self._registered_port = None
@@ -337,6 +337,11 @@ class MCP(idaapi.plugin_t):
         # Keep module identity stable while a Nexus bridge owns its registries.
         # The official distribution also uses the top-level name ida_mcp.
         from ida_pro_mcp.ida_mcp import MCP_SERVER, IdaMcpHttpRequestHandler
+        from ida_pro_mcp.ida_mcp.instance_hooks import install_instance_hooks, activate_database
+        from ida_pro_mcp.ida_mcp.instance_dispatch import install_instance_dispatch
+        install_instance_hooks(self._database_identity_changed)
+        activate_database()
+        install_instance_dispatch(MCP_SERVER)
 
         port = self.port
         max_port = port + 100
@@ -362,6 +367,10 @@ class MCP(idaapi.plugin_t):
             import os
             import idc
             import ida_nalt
+            from ida_pro_mcp.instance_runtime import runtime_identity
+            identity = runtime_identity().snapshot()
+            if not identity:
+                return
             binary = ida_nalt.get_root_filename() or ""
             binary_path = ida_nalt.get_input_file_path() or ""
             idb_path = idc.get_idb_path() or ""
@@ -372,15 +381,23 @@ class MCP(idaapi.plugin_t):
                 binary=binary,
                 binary_path=binary_path,
                 idb_path=idb_path,
-                instance_id=self.instance_id,
+                instance_id=identity["instance_id"],
+                generation=identity["generation"],
             )
             self._registered_port = port
+            self._registered_generation = identity["generation"]
             print(f"[MCP] Registered instance: {binary} (pid={os.getpid()}, port={port})")
             print(f"  Discovery file: {file_path}")
         except Exception as e:
             import traceback
             print(f"[MCP] Instance registration failed: {e}")
             traceback.print_exc()
+
+    def _database_identity_changed(self):
+        port = getattr(self, "_registered_port", None)
+        if port is not None:
+            self._unregister_instance()
+            self._register_instance(port)
 
     def _stop_server(self):
         """Stop the server and remove its discovery registration."""

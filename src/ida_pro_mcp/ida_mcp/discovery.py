@@ -31,6 +31,8 @@ class LaunchInstanceResult(TypedDict, total=False):
 
 class InstanceInfo(TypedDict, total=False):
     instance_id: str
+    generation: str
+    identity_version: int
     host: str
     port: int
     pid: int
@@ -82,6 +84,7 @@ def register_instance(
     backend: str = "gui",
     instance_id: str = "",
     binary_path: str = "",
+    generation: str = "",
 ) -> str:
     """Write an instance registration file. Returns the file path."""
     info: InstanceInfo = {
@@ -95,6 +98,8 @@ def register_instance(
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "backend": backend,
     }
+    if generation:
+        info.update(generation=generation, identity_version=1)
     instances_dir = get_instances_dir()
     os.makedirs(instances_dir, exist_ok=True)
     file_path = _instance_file_path(port)
@@ -113,13 +118,17 @@ def register_instance(
     return file_path
 
 
-def unregister_instance(port: int) -> bool:
+def unregister_instance(port: int, generation: str = "") -> bool:
     """Remove an instance registration file. Returns True if removed."""
     file_path = _instance_file_path(port)
     try:
+        if generation:
+            with open(file_path, encoding="utf-8") as stream:
+                if json.load(stream).get("generation") != generation:
+                    return False
         os.unlink(file_path)
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 

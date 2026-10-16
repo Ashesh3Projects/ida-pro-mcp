@@ -318,7 +318,12 @@ def idasync(f):
         # Capture on the requesting thread before either execute_sync or the
         # legacy headless pump hands work off to IDA's main thread.
         context = copy_context()
-        ff = functools.partial(context.run, f, *args, **kwargs)
+        def guarded_call():
+            from ida_pro_mcp.instance_runtime import check_request_generation
+            check_request_generation()
+            return f(*args, **kwargs)
+
+        ff = functools.partial(context.run, guarded_call)
         ff.__name__ = f.__name__
         cancel_event = get_bridge_cancel_event() or get_current_cancel_event()
         timeout_override = _normalize_timeout(

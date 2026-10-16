@@ -15,6 +15,11 @@ from _mcp_spec_support import load_ida_rpc_module
 @pytest.fixture
 def runtime(monkeypatch):
     from ida_pro_mcp import bridge_runtime
+    from ida_pro_mcp import instance_runtime
+
+    state = instance_runtime.RuntimeIdentity()
+    state.activate("fixture.exe", "fixture.i64")
+    monkeypatch.setattr(instance_runtime, "_runtime", state)
 
     rpc = load_ida_rpc_module()
     context = importlib.import_module(rpc.__package__ + ".execution_context")
@@ -36,6 +41,9 @@ def request(runtime, method="POST", path="/mcp", *, body=None, headers=None, aut
         descriptor["host"], descriptor["port"], timeout=4
     )
     actual_headers = {"Content-Type": "application/json"}
+    actual_headers["X-IDA-MCP-Generation"] = descriptor["generation"]
+    if isinstance(body, dict) and body.get("method") in {"tools/call", "resources/read"}:
+        body.setdefault("params", {}).setdefault("_meta", {}).setdefault("ida_pro_mcp_generation", descriptor["generation"])
     if auth:
         actual_headers["Authorization"] = "Bearer " + descriptor["token"]
     actual_headers.update(headers or {})
@@ -73,7 +81,7 @@ def test_authenticated_listener_starts_once_and_dispatches_actual_registry(runti
         descriptors = list(pool.map(lambda _: module.ensure_bridge(), range(16)))
     assert all(item == descriptor for item in descriptors)
     assert descriptor["host"] == "127.0.0.1"
-    assert descriptor["version"] == 1
+    assert descriptor["version"] == 2
     status, data = request(runtime, body=call())
     assert status == 200
     assert json.loads(data)["result"]["structuredContent"] == {"client": "one"}
@@ -95,6 +103,19 @@ def test_every_route_requires_token(runtime, method, path):
         request(runtime, method, path, headers={"Authorization": "Bearer incorrect"})[0]
         == 401
     )
+
+
+def test_wrong_generation_never_reaches_backend(runtime):
+    calls = []
+    @runtime[1].tool
+    def identify() -> dict:
+        calls.append(True)
+        return {}
+    body = call()
+    body["params"]["_meta"]["ida_pro_mcp_generation"] = "0" * 16
+    _, data = request(runtime, body=body)
+    assert json.loads(data)["error"]["data"]["error_code"] == "INSTANCE_CHANGED"
+    assert calls == []
 
 
 @pytest.mark.parametrize(

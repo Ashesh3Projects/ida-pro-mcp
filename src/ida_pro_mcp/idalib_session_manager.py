@@ -17,6 +17,7 @@ import idapro
 import ida_auto
 
 from .ida_mcp.api_core import invalidate_strings_cache
+from .instance_runtime import runtime_identity
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +175,10 @@ class IDASessionManager:
 
         if idapro.open_database(input_path, run_auto_analysis=run_auto_analysis):
             raise RuntimeError(f"Failed to open database: {input_path}")
+        runtime_identity().activate(input_path, input_path)
 
     def _close_active_database(self) -> None:
+        runtime_identity().invalidate()
         if self._active_session_id is not None:
             logger.debug("Closing active database (session: %s)", self._active_session_id)
             idapro.close_database()

@@ -65,6 +65,13 @@ def test_package_loader_keeps_official_namespace_intact(monkeypatch):
     fork_package.MCP_SERVER = fake_server
     fork_package.IdaMcpHttpRequestHandler = object
     monkeypatch.setitem(sys.modules, "ida_pro_mcp.ida_mcp", fork_package)
+    hooks = ModuleType("ida_pro_mcp.ida_mcp.instance_hooks")
+    hooks.install_instance_hooks = lambda callback=None: None
+    hooks.activate_database = lambda: None
+    dispatch = ModuleType("ida_pro_mcp.ida_mcp.instance_dispatch")
+    dispatch.install_instance_dispatch = lambda server: None
+    monkeypatch.setitem(sys.modules, hooks.__name__, hooks)
+    monkeypatch.setitem(sys.modules, dispatch.__name__, dispatch)
     monkeypatch.setattr(loader, "unload_package", lambda name: seen.append(name))
     instance = loader.MCP()
     instance.host = "127.0.0.1"
