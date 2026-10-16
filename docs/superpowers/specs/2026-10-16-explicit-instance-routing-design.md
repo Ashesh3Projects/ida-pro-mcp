@@ -2,7 +2,8 @@
 
 Date: 2026-10-16
 
-Status: proposed design; source investigation and isolated framework probes completed.
+Status: approved by the user on 2026-10-16; source investigation and isolated
+framework probes completed.
 The application changes described here are not implemented yet.
 
 ## Outcome and decisions
@@ -372,5 +373,5 @@ endpoint behavior. Instance IDs are routing identifiers, not authentication.
 - Probe artifacts: `probe.py`, `probe-results.json`, and `probe_bridge.py` in that
   directory. They are throwaway research code and are not product implementation.
 
-Written-spec review is the next checkpoint. The implementation plan follows
-approval of this design.
+The user approved this written design. The implementation plan is
+`docs/superpowers/plans/2026-10-16-explicit-instance-routing.md`.
