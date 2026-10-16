@@ -150,3 +150,40 @@ def test_close_all_sessions_invalidates_strings_cache(session_env, tmp_path):
     session_env.manager.close_all_sessions()
 
     assert session_env.spy.invalidations >= 1
+
+
+def test_worker_database_close_releases_direct_client_namespaces(
+    session_env, tmp_path, monkeypatch
+):
+    from _mcp_spec_support import load_ida_rpc_module
+    from ida_pro_mcp.instance_runtime import runtime_identity
+
+    rpc = load_ida_rpc_module()
+    dispatch = importlib.import_module(rpc.__package__ + ".instance_dispatch")
+    context = importlib.import_module(rpc.__package__ + ".execution_context")
+    monkeypatch.setitem(sys.modules, "ida_pro_mcp.ida_mcp.instance_dispatch", dispatch)
+    server = rpc.McpServer("worker-lifetime")
+
+    @server.tool
+    def inspect() -> dict:
+        return {"ok": True}
+
+    dispatch.install_instance_dispatch(server)
+    session_env.manager.open_binary(
+        _make_binary(tmp_path, "a.bin"), run_auto_analysis=False
+    )
+    generation = runtime_identity().snapshot()["generation"]
+    server._transport_session_id.data = "http:worker-context"
+    result = server.registry.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "inspect", "arguments": {"instance_id": generation}},
+        }
+    )
+    assert not result["result"]["isError"]
+    key = f"direct:http:worker-context:{generation}"
+    assert key in context._sessions
+    session_env.manager.close_all_sessions()
+    assert key not in context._sessions

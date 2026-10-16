@@ -374,6 +374,7 @@ class MCP(idaapi.plugin_t):
                 )
                 print(f"  Config: http://{self.host}:{port}/config.html")
                 self.mcp = MCP_SERVER
+                self._listener_port = port
                 self._register_instance(port)
                 return
             except OSError as e:
@@ -420,7 +421,8 @@ class MCP(idaapi.plugin_t):
             traceback.print_exc()
 
     def _database_identity_changed(self):
-        port = getattr(self, "_registered_port", None)
+        # Listener lifetime is independent of a database's discovery record.
+        port = getattr(self, "_listener_port", None)
         if port is not None:
             self._unregister_instance()
             self._register_instance(port)
@@ -431,6 +433,7 @@ class MCP(idaapi.plugin_t):
         if self.mcp:
             self.mcp.stop()
             self.mcp = None
+        self._listener_port = None
 
     def _restart_server(self):
         """Apply configuration changes without changing toggle semantics."""

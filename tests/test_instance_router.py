@@ -171,3 +171,92 @@ def test_repeated_open_of_provider_owned_session_does_not_close_it():
         await router.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_open_cannot_release_retained_session_after_failed_save():
+    async def scenario():
+        p, router, a, _ = await setup()
+        await router.request(a, "tools/call", PARAMS)
+        existing = p.sessions[0]
+        original = existing.request
+
+        async def fail_save(invocation, method, params):
+            if method == "save_database":
+                raise RuntimeError("disk full")
+            return await original(invocation, method, params)
+
+        async def reuse(path, options):
+            return existing
+
+        existing.request = fail_save
+        p.open_path = reuse
+        try:
+            with pytest.raises(RuntimeError, match="disk full"):
+                await router.close_database(a, save=True)
+            with pytest.raises(RoutingError, match="closing"):
+                await router.open_database("/samples/A.exe")
+            assert not existing.closed
+            assert (await router.instance_status(a))["status"] == "closing"
+        finally:
+            existing.request = original
+            await router.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_cancels_work_before_waiting_for_dependent_alias_open():
+    async def scenario():
+        p, router, a, _ = await setup()
+        p.block_request("A")
+        call = asyncio.create_task(router.request(a, "tools/call", PARAMS))
+        await p.wait_entered("A", "request")
+        existing = p.sessions[0]
+        opening = asyncio.Event()
+
+        async def reuse(path, options):
+            opening.set()
+            return existing
+
+        p.open_path = reuse
+        opened = asyncio.create_task(router.open_database("/samples/A.i64"))
+        await opening.wait()
+        shutdown = asyncio.create_task(router.shutdown())
+        try:
+            done, _ = await asyncio.wait({shutdown}, timeout=1)
+            assert shutdown in done, "shutdown waits for open before cancelling A"
+            await shutdown
+            assert [key for key, _ in p.cancelled] == ["A"]
+            assert existing.closed
+            assert existing.close_count == 1
+        finally:
+            p.release_request("A")
+            await asyncio.gather(call, opened, shutdown, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_late_alias_open_does_not_close_previously_owned_session_twice():
+    async def scenario():
+        p, router, a, _ = await setup()
+        await router.request(a, "tools/call", PARAMS)
+        existing = p.sessions[0]
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def reuse(path, options):
+            entered.set()
+            await release.wait()
+            return existing
+
+        p.open_path = reuse
+        opened = asyncio.create_task(router.open_database("/samples/A.i64"))
+        await entered.wait()
+        await router.close_database(a)
+        release.set()
+        try:
+            with pytest.raises(RoutingError):
+                await opened
+        finally:
+            await router.shutdown()
+        assert existing.close_count == 1
+
+    asyncio.run(scenario())

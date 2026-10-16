@@ -23,7 +23,12 @@ def activate_database():
 
 
 def invalidate_database():
+    previous = runtime_identity().snapshot().get("generation")
     runtime_identity().invalidate()
+    if previous:
+        from .instance_dispatch import retire_database_contexts
+
+        retire_database_contexts(previous)
     if _on_change is not None:
         _on_change()
     refresh_gui_service()

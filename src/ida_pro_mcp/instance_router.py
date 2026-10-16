@@ -7,6 +7,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 import os
+import weakref
 
 import anyio
 
@@ -51,6 +52,7 @@ class InstanceRouter:
         self.registry = registry or InstanceRegistry()
         self._slots: dict[str, _Slot] = {}
         self._opens: dict[str, asyncio.Task] = {}
+        self._session_bindings = weakref.WeakKeyDictionary()
         self._shutdown = False
         self._output_store = OutputStore()
 
@@ -104,6 +106,7 @@ class InstanceRouter:
         slot.phases[invocation] = "attaching"
         session = await self.provider.attach(slot.binding.identity, invocation)
         slot.session = session
+        self._session_bindings[session] = slot.binding
         if (
             session.identity.key != slot.binding.identity.key
             or session.identity.provider != slot.binding.identity.provider
@@ -237,24 +240,36 @@ class InstanceRouter:
 
     async def _open(self, path, options):
         session = await self.provider.open_path(path, options)
-        binding = self.registry.publish(session.identity)
-        slot = self._slot(binding)
         try:
+            owner = self._session_bindings.get(session)
+            binding = (
+                self.registry.resolve(owner.instance_id)
+                if owner is not None
+                else self.registry.publish(session.identity)
+            )
+            slot = self._slot(binding)
             async with slot.gate:
                 self.registry.resolve(binding.instance_id)
+                if slot.session is None:
+                    slot.session = session
+                    self._session_bindings[session] = binding
+                    session = None
+                    if not self._shutdown:
+                        self.registry.set_state(binding, "ready")
+                elif slot.session is session:
+                    session = None
                 if self._shutdown:
+                    # Shutdown's final sweep owns a newly acquired session,
+                    # including a failed release; never strand it in this task.
+                    self.registry.set_state(binding, "closing")
                     raise RoutingError(
                         "INSTANCE_CLOSED", "Server closed while database was opening."
                     )
-                if slot.session is None:
-                    slot.session = session
-                    session = None
-                    self.registry.set_state(binding, "ready")
-                elif slot.session is session:
-                    session = None
             return self.registry.describe(binding)
         finally:
-            if session is not None:
+            if session is not None and session not in self._session_bindings:
+                # Some providers return an already-owned session for an alias.
+                # Rejecting a closing binding must not release that same lease.
                 await session.close()
 
     async def open_database(self, path: str, **options) -> dict:
@@ -313,16 +328,34 @@ class InstanceRouter:
     async def shutdown(self) -> None:
         self._shutdown = True
         opens = list(self._opens.values())
-        if opens:
-            await asyncio.gather(*opens, return_exceptions=True)
         targets = [
             b
             for b in self.registry.bindings()
             if self.registry.state(b) not in {"closed", "unavailable", "incompatible"}
         ]
-        results = await asyncio.gather(
-            *(self.close_database(b.instance_id) for b in targets),
+        # An alias open may be waiting on an active call's admission gate.
+        # Start cancellation now, rather than waiting for the dependent open.
+        closing = [
+            asyncio.create_task(self.close_database(b.instance_id)) for b in targets
+        ]
+        outcomes = await asyncio.gather(
+            *closing,
+            *opens,
             return_exceptions=True,
+        )
+        results = outcomes[: len(closing)]
+        initial = {b.instance_id for b in targets}
+        late = [
+            b
+            for b in self.registry.bindings()
+            if b.instance_id not in initial
+            and self.registry.state(b) not in {"closed", "unavailable", "incompatible"}
+        ]
+        results.extend(
+            await asyncio.gather(
+                *(self.close_database(b.instance_id) for b in late),
+                return_exceptions=True,
+            )
         )
         errors = [result for result in results if isinstance(result, Exception)]
         if errors:

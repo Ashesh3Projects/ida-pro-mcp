@@ -8,6 +8,7 @@ there is no implicit "current session" or transport-context binding.
 import uuid
 import threading
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, Optional, Any
 from dataclasses import dataclass, field
@@ -181,7 +182,13 @@ class IDASessionManager:
         runtime_identity().activate(input_path, input_path)
 
     def _close_active_database(self) -> None:
+        previous = runtime_identity().snapshot().get("generation")
         runtime_identity().invalidate()
+        # The headless worker does not install GUI hooks. If its direct
+        # dispatcher exists, retire its old Python contexts explicitly.
+        dispatcher = sys.modules.get("ida_pro_mcp.ida_mcp.instance_dispatch")
+        if previous and dispatcher is not None:
+            dispatcher.retire_database_contexts(previous)
         if self._active_session_id is not None:
             logger.debug(
                 "Closing active database (session: %s)", self._active_session_id

@@ -136,6 +136,7 @@ class ProxySession:
         self.runtime_generation = record.get("generation", "")
         self.client_id = secrets.token_hex(16)
         self._active = {}
+        self._uncertain = set()
         self._closed = False
 
     def rpc(self, method, params, request_id):
@@ -221,6 +222,9 @@ class ProxySession:
     async def request(self, invocation, method, params):
         if self._closed:
             raise RoutingError("INSTANCE_CLOSED", "IDA binding has closed")
+        if self._uncertain:
+            await self._drain_uncertain()
+        remote_operation = method != "output/read"
         if method == "output/read":
             worker = asyncio.create_task(
                 asyncio.to_thread(self._download, params["output_id"])
@@ -249,8 +253,12 @@ class ProxySession:
                 asyncio.to_thread(self.rpc, method, params, invocation.operation_id)
             )
         self._active[invocation.operation_id] = worker
+        if remote_operation:
+            # A socket completing with an exception is not backend completion.
+            self._uncertain.add(invocation.operation_id)
         try:
             result = await asyncio.shield(worker)
+            self._uncertain.discard(invocation.operation_id)
             if params.get("name") == "idb_save" and (
                 result.get("isError")
                 or not result.get("structuredContent", {}).get("ok")
@@ -261,8 +269,10 @@ class ProxySession:
 
             async def drain():
                 await self.cancel(invocation)
-                with suppress(asyncio.CancelledError):
+                with suppress(asyncio.CancelledError, Exception):
                     await worker
+                if remote_operation:
+                    await self._drain_uncertain()
 
             await finish_cleanup(asyncio.create_task(drain()))
             raise
@@ -271,7 +281,10 @@ class ProxySession:
 
     async def cancel(self, invocation):
         invocation.cancelled.set()
-        if invocation.operation_id in self._active:
+        if (
+            invocation.operation_id in self._active
+            or invocation.operation_id in self._uncertain
+        ):
             with suppress(Exception):
                 await asyncio.to_thread(
                     self.rpc,
@@ -280,7 +293,35 @@ class ProxySession:
                     None,
                 )
 
+    async def _drain_uncertain(self):
+        operations = list(self._uncertain)
+        if not operations:
+            return
+        result = await asyncio.to_thread(
+            self.rpc,
+            "instance/drain",
+            {"instance_id": self.runtime_generation, "request_ids": operations},
+            secrets.token_hex(16),
+        )
+        if result.get("drained") is not True:
+            raise RuntimeError("IDA did not acknowledge operation drain")
+        self._uncertain.difference_update(operations)
+
     async def close(self):
+        if self._closed:
+            return
         if self._active:
             await asyncio.gather(*self._active.values(), return_exceptions=True)
+        # The server fences this exact transport client before draining all of
+        # its work, even when a response/connection was lost. Do not set closed
+        # or release a supervisor worker until this ACK actually arrives.
+        result = await asyncio.to_thread(
+            self.rpc,
+            "instance/release",
+            {"instance_id": self.runtime_generation},
+            secrets.token_hex(16),
+        )
+        if result.get("released") is not True:
+            raise RuntimeError("IDA did not acknowledge client release")
+        self._uncertain.clear()
         self._closed = True

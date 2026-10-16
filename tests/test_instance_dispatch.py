@@ -1,4 +1,7 @@
 import importlib
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import pytest
 
@@ -108,3 +111,93 @@ def test_resource_requires_one_id_and_restores_uri(endpoint):
             }
         )
         assert "error" in response
+
+
+def test_release_is_client_scoped_and_rejects_late_requests(endpoint):
+    server, _, generation, calls = endpoint
+    server._transport_session_id.data = "http:client-a"
+    assert not call(server, {"instance_id": generation})["result"]["isError"]
+    response = server.registry.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "release",
+            "method": "instance/release",
+            "params": {"instance_id": generation},
+        }
+    )
+    assert response.get("result") == {"released": True}
+    assert call(server, {"instance_id": generation})["result"]["isError"]
+    server._transport_session_id.data = "http:client-b"
+    assert not call(server, {"instance_id": generation})["result"]["isError"]
+    assert calls == [1, 1]
+
+
+def test_database_retirement_clears_obsolete_direct_namespaces(endpoint):
+    server, state, generation, _ = endpoint
+    context = importlib.import_module(
+        server.__class__.__module__.rsplit(".", 2)[0] + ".execution_context"
+    )
+    # The RPC loader uses an isolated package so the real IDA package is not imported.
+    server._transport_session_id.data = "http:retiring-client"
+    call(server, {"instance_id": generation})
+    key = f"direct:http:retiring-client:{generation}"
+    assert key in context._sessions
+    state.invalidate()
+    server._retire_instance_generation(generation)
+    assert key not in context._sessions
+
+
+def test_drain_fences_not_yet_admitted_request_without_expiry(endpoint, monkeypatch):
+    server, _, generation, calls = endpoint
+    module = importlib.import_module(
+        server.__class__.__module__.rsplit(".", 2)[0] + ".instance_dispatch"
+    )
+    server._transport_session_id.data = "http:delayed-client"
+    response = server.registry.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "drain",
+            "method": "instance/drain",
+            "params": {"instance_id": generation, "request_ids": [7]},
+        }
+    )
+    assert response["result"] == {"drained": True}
+    # A transport delay must not revive an operation after drain acknowledged it.
+    monkeypatch.setattr(module.time, "monotonic", lambda: 10**15)
+    response = call(server, {"instance_id": generation})
+    assert response["result"]["isError"]
+    assert calls == []
+
+
+def test_retirement_before_context_entry_cannot_leak_namespace(endpoint, monkeypatch):
+    server, state, generation, _ = endpoint
+    package = server.__class__.__module__.rsplit(".", 2)[0]
+    module = importlib.import_module(package + ".instance_dispatch")
+    context = importlib.import_module(package + ".execution_context")
+    entered, ready = threading.Event(), threading.Event()
+    original = module.bridge_context
+
+    @contextmanager
+    def delayed(client, event):
+        entered.set()
+        assert ready.wait(3)
+        with original(client, event):
+            yield
+
+    monkeypatch.setattr(module, "bridge_context", delayed)
+
+    def request():
+        server._transport_session_id.data = "http:retire-race"
+        return call(server, {"instance_id": generation})
+
+    with ThreadPoolExecutor() as executor:
+        future = executor.submit(request)
+        try:
+            assert entered.wait(2)
+            state.invalidate()
+            server._retire_instance_generation(generation)
+        finally:
+            ready.set()
+        response = future.result(3)
+    assert response["result"]["isError"]
+    assert f"direct:http:retire-race:{generation}" not in context._sessions

@@ -7,6 +7,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import secrets
 
 from ida_nexus import (
     DatabaseHandle,
@@ -108,14 +109,21 @@ class NexusSession:
         self._analysis_complete = False
 
     async def initialize(self, invocation=None):
-        operation_id = invocation.operation_id if invocation else None
-        result = await asyncio.to_thread(
-            self.handle.execute_python,
-            bootstrap_expression(),
-            timeout=120,
-            operation_id=operation_id,
-            persist_globals=True,
-            operation_label="ida-pro-mcp bridge bootstrap",
+        operation_id = invocation.operation_id if invocation else secrets.token_hex(16)
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                self.handle.execute_python,
+                bootstrap_expression(),
+                timeout=120,
+                operation_id=operation_id,
+                persist_globals=True,
+                operation_label="ida-pro-mcp bridge bootstrap",
+            )
+        )
+        result = await self._await_execution(
+            worker,
+            operation_id,
+            invocation.cancelled if invocation else None,
         )
         descriptor = result.get("result")
         endpoint = Endpoint.parse(descriptor)
@@ -161,16 +169,30 @@ class NexusSession:
                 operation_label="ida-pro-mcp",
             )
         )
+        return await self._await_execution(
+            worker, invocation.operation_id, invocation.cancelled
+        )
+
+    async def _await_execution(self, worker, operation_id, cancelled=None):
         try:
-            return await asyncio.shield(worker)
+            # Attachment owns the handle before the router has a session. The
+            # invocation event must therefore cancel bootstrap here as well.
+            while not worker.done():
+                if cancelled is not None and cancelled.is_set():
+                    raise asyncio.CancelledError()
+                await asyncio.wait({worker}, timeout=0.025)
+            if cancelled is not None and cancelled.is_set():
+                raise asyncio.CancelledError()
+            return worker.result()
         except asyncio.CancelledError:
-            invocation.cancelled.set()
+            if cancelled is not None:
+                cancelled.set()
 
             async def drain():
                 while not worker.done():
                     with suppress(Exception):
                         await asyncio.to_thread(
-                            self.handle.cancel_operation, invocation.operation_id
+                            self.handle.cancel_operation, operation_id
                         )
                     await asyncio.sleep(0.01)
                 with suppress(BaseException):

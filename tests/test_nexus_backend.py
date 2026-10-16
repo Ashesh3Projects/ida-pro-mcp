@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -109,5 +110,69 @@ def test_disappeared_record_cannot_resolve_replacement(monkeypatch):
         await provider.discover()
         with pytest.raises(RoutingError):
             await provider.attach(old, Invocation(InstanceBinding("b" * 16, old)))
+
+    asyncio.run(scenario())
+
+
+def test_router_cancellation_reaches_bootstrap_before_attachment_finishes(monkeypatch):
+    from ida_pro_mcp import nexus_backend
+    from ida_pro_mcp.instance_router import InstanceRouter
+
+    entered, finished = threading.Event(), threading.Event()
+    cancelled = []
+
+    class BlockingHandle(Handle):
+        def execute_python(self, code, **kwargs):
+            self.operation_id = kwargs["operation_id"]
+            entered.set()
+            assert finished.wait(5)
+            return super().execute_python(code, **kwargs)
+
+        def cancel_operation(self, operation_id):
+            cancelled.append(operation_id)
+            finished.set()
+            return True
+
+    handle = BlockingHandle(record())
+    monkeypatch.setattr(
+        nexus_backend,
+        "UnifiedBridge",
+        lambda *a, **kw: SimpleNamespace(shutdown=lambda: None),
+    )
+    monkeypatch.setattr(
+        nexus_backend,
+        "discover_databases",
+        lambda: [
+            SimpleNamespace(instance=handle.instance, state=InstanceState.READY),
+        ],
+    )
+    monkeypatch.setattr(nexus_backend.DatabaseHandle, "attach", lambda *a, **kw: handle)
+
+    async def scenario():
+        router = InstanceRouter(NexusProvider())
+        target = (await router.list_instances())["instances"][0]["instance_id"]
+        call = asyncio.create_task(
+            router.request(
+                target,
+                "tools/call",
+                {
+                    "name": "server_health",
+                    "arguments": {},
+                },
+            )
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            call.cancel()
+            done, _ = await asyncio.wait({call}, timeout=1)
+            assert call in done, "bootstrap never received cancellation"
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            assert cancelled and set(cancelled) == {handle.operation_id}
+            assert handle.closed
+        finally:
+            finished.set()
+            await asyncio.gather(call, return_exceptions=True)
+            await router.shutdown()
 
     asyncio.run(scenario())

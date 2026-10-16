@@ -168,3 +168,55 @@ def test_mismatched_abi_manifest_does_not_load_external_binary_packages(
     monkeypatch.setattr(sys, "path", list(sys.path))
     loader._configure_runtime_paths()
     assert str(external) not in sys.path
+
+
+def test_running_listener_republishes_after_database_invalidation(monkeypatch):
+    from ida_pro_mcp import instance_runtime
+    from ida_pro_mcp.instance_runtime import RuntimeIdentity
+
+    fake_idaapi = ModuleType("idaapi")
+    fake_idaapi.Form = SimpleNamespace
+    fake_idaapi.action_handler_t = object
+    fake_idaapi.plugin_t = object
+    fake_idaapi.PLUGIN_KEEP = 0
+    fake_kernwin = ModuleType("ida_kernwin")
+    fake_kernwin.UI_Hooks = object
+    monkeypatch.setitem(sys.modules, "idaapi", fake_idaapi)
+    monkeypatch.setitem(sys.modules, "ida_kernwin", fake_kernwin)
+    monkeypatch.setitem(sys.modules, "ida_netnode", ModuleType("ida_netnode"))
+    monkeypatch.setitem(
+        sys.modules, "idc", SimpleNamespace(get_idb_path=lambda: "b.i64")
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ida_nalt",
+        SimpleNamespace(
+            get_root_filename=lambda: "b.exe",
+            get_input_file_path=lambda: "b.exe",
+        ),
+    )
+    events = []
+    discovery = ModuleType("ida_pro_mcp.ida_mcp.discovery")
+    discovery.register_instance = lambda **kw: events.append(("register", kw))
+    discovery.unregister_instance = lambda *args: events.append(("unregister", args))
+    monkeypatch.setitem(sys.modules, discovery.__name__, discovery)
+    spec = importlib.util.spec_from_file_location(
+        "_loader_identity_test", installer.IDA_PLUGIN_LOADER
+    )
+    loader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loader)
+    state = RuntimeIdentity()
+    old = state.activate("a.exe", "a.i64")
+    monkeypatch.setattr(instance_runtime, "_runtime", state)
+    instance = loader.MCP()
+    instance.host = "127.0.0.1"
+    instance._listener_port = instance._registered_port = 13337
+    instance._registered_generation = old
+    instance.mcp = object()
+    state.invalidate()
+    instance._database_identity_changed()
+    new = state.activate("b.exe", "b.i64")
+    instance._database_identity_changed()
+    assert [event[0] for event in events] == ["unregister", "register"]
+    assert events[-1][1]["generation"] == new
+    assert instance._registered_port == 13337
