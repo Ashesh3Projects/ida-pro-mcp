@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.0.1 - 2026-10-16
+
+- Prepare the explicit-instance migration and its review fixes for integration into main, with matching package, lockfile, IDA plugin, and client manifest versions.
+- Require acknowledged legacy cancellation/drain before releasing bindings; release client Python namespaces and retain failed-close ownership across alias opens.
+- Fix shutdown/open ordering, GUI discovery re-registration, Nexus bootstrap cancellation, and lifecycle diagnostic events.
+- Retain the 4.0 breaking contract: upgrade the plugin, reconnect the MCP client, and rediscover instance IDs together.
+
 ## 4.0.0 - Explicit multi-instance routing
 
 - Require a random `instance_id` on every database tool, resource read and output continuation. Remove selected/current instance state, `select_instance`, caller-chosen IDs and implicit GUI-to-headless replacement.

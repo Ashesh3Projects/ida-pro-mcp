@@ -126,11 +126,33 @@ the default locked download host failed TLS; product dependency pins were kept.
   records originate at binding ownership, not merely management tool names;
   the Nexus disconnect callback projects safe metadata without transport text.
 
-This is a local prepared implementation, not a release: no push, PR, merge,
-publish, or normal installation was performed. When installing 4.0 later,
+At the initial implementation checkpoint this was local only: no push, PR,
+merge, publish, or normal installation had been performed. When installing 4.0 later,
 restart IDA and reconnect the MCP client to reload schemas, then discover fresh
 IDs. The managed worktree and branch are preserved.
 
 Selected logs are preserved locally under `.pytest-tmp-routing-evidence/`.
 Removal of this plan's ignored `.superpowers/sdd/` scratch directory was blocked
 by execution policy, so it was retained; no cleanup bypass was attempted.
+
+## 4.0.1 integration verification
+
+The user subsequently authorized a version bump, pull request, and merge to
+`main`. Version 4.0.1 increments the prepared 4.0.0 branch; the remote base was
+3.0.1 at `7245a50a92ef914cbb64d9be6d000785cbbcb41e`. Package, lockfile, IDA
+descriptor, and all three client manifests agree on 4.0.1. A separate read-only
+review of this metadata delta reported no findings.
+
+Fresh pre-PR verification on 2026-10-16:
+
+- Offline suite: **401 passed, 1 opt-in skip, 119 subtests**, 72.20 s.
+- Opt-in live stdio / real HTTP acceptance: **2 passed**, 31.13 s.
+- Offline lock consistency, Ruff `F`, and `git diff --check`: passed.
+- Rebuilt 4.0.1 wheel installed non-editably and tested under Python `-I`:
+  97 tools, missing-ID rejection, and two-instance parallel routing passed.
+- Wheel SHA-256:
+  `98f987d928eca7b6e4731410d58dc338cf236ef8cef67b13a259861cee5fbf1f`.
+
+Hosted CI and merge status belong to the pull request, not the earlier local
+checkpoint. Tagging, package/release publication, and normal installation remain
+outside this integration request. The live-validation limits above still apply.
