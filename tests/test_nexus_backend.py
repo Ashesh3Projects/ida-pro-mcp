@@ -51,6 +51,9 @@ class Handle:
     def cancel_operation(self, op):
         return True
 
+    def set_disconnect_callback(self, callback):
+        self.disconnect_callback = callback
+
 
 def test_discovery_does_not_acquire_and_attach_uses_exact_record(monkeypatch):
     from ida_pro_mcp import nexus_backend
@@ -176,3 +179,14 @@ def test_router_cancellation_reaches_bootstrap_before_attachment_finishes(monkey
             await router.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_nexus_disconnect_notifies_router_without_transport_details():
+    from ida_pro_mcp.nexus_backend import NexusSession
+
+    handle = Handle(record())
+    session = NexusSession(handle)
+    calls = []
+    session.set_disconnect_callback(lambda: calls.append("disconnected"))
+    handle.disconnect_callback(handle, "private transport details")
+    assert calls == ["disconnected"]

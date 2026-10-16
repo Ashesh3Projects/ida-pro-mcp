@@ -172,6 +172,7 @@ def create_server(
     trace=None,
 ):
     extensions = set(extensions or ())
+    router.trace = trace
     if extensions - {"dbg"}:
         raise ValueError("Unknown extension; supported extension: dbg")
 

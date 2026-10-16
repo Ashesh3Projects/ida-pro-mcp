@@ -157,6 +157,11 @@ class NexusSession:
         self.resolve_instance_id(target)
         return self.handle.cancel_operation(operation_id)
 
+    def set_disconnect_callback(self, callback):
+        # The public trace receives only its binding's safe metadata, never
+        # handle credentials or an arbitrary transport-provided reason string.
+        self.handle.set_disconnect_callback(lambda handle, reason: callback())
+
     async def _execute(self, invocation, code, timeout):
         worker = asyncio.create_task(
             asyncio.to_thread(

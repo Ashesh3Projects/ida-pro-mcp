@@ -54,3 +54,44 @@ def test_middleware_preserves_routing_and_hides_backend_credentials(tmp_path):
         assert failed[0]["tool"] == "decompile"
 
     asyncio.run(scenario())
+
+
+def test_router_traces_reuse_disconnect_save_failed_close_and_shutdown(tmp_path):
+    async def scenario():
+        provider = FakeProvider([identity(name) for name in ("A", "B", "C")])
+        writer = TraceWriter(tmp_path, agent="test")
+        server = create_server(InstanceRouter(provider), trace=writer)
+        async with Client(server) as client:
+            await client.call_tool("list_instances", {})
+            a = (
+                await client.call_tool("open_database", {"path": "/samples/A.exe"})
+            ).data["instance_id"]
+            again = (
+                await client.call_tool("open_database", {"path": "/samples/A.i64"})
+            ).data["instance_id"]
+            assert a == again
+            b = (
+                await client.call_tool("open_database", {"path": "/samples/B.exe"})
+            ).data["instance_id"]
+            await client.call_tool("save_database", {"instance_id": a})
+            provider.records = [r for r in provider.records if r.key != "C"]
+            await client.call_tool("list_instances", {})
+            provider.fail_close.add("A")
+            assert (
+                await client.call_tool_mcp("close_database", {"instance_id": a})
+            ).is_error
+            provider.fail_close.clear()
+            await client.call_tool("close_database", {"instance_id": a})
+        events = [json.loads(line) for line in writer.path.read_text().splitlines()]
+        names = [row["event"] for row in events]
+        assert names.count("database_opened") == 2
+        assert names.count("database_reused") == 1
+        assert names.count("database_disconnected") == 1
+        assert names.count("database_saved") == 1
+        assert names.count("database_release_error") == 1
+        assert {
+            row["instance_id"] for row in events if row["event"] == "database_released"
+        } == {a, b}
+        assert names[0] == "mcp_started" and names[-1] == "mcp_stopped"
+
+    asyncio.run(scenario())

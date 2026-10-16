@@ -7,6 +7,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 import os
+import threading
 import weakref
 
 import anyio
@@ -55,6 +56,37 @@ class InstanceRouter:
         self._session_bindings = weakref.WeakKeyDictionary()
         self._shutdown = False
         self._output_store = OutputStore()
+        self.trace = None
+        self._trace_lock = threading.RLock()
+        self._disconnected = set()
+
+    def _emit(self, event, binding):
+        if self.trace is not None:
+            identity = binding.identity
+            self.trace.emit(
+                event,
+                instance_id=binding.instance_id,
+                target={
+                    "idb_path": identity.idb_path,
+                    "exe_path": identity.binary_path,
+                    "backend": identity.backend,
+                },
+            )
+
+    def _disconnected_event(self, binding):
+        with self._trace_lock:
+            if binding.instance_id not in self._disconnected:
+                self._disconnected.add(binding.instance_id)
+                self._emit("database_disconnected", binding)
+
+    def _adopt(self, slot, session):
+        slot.session = session
+        self._session_bindings[session] = slot.binding
+        # Nexus signals disconnect independently of the next tool request.
+        callback = getattr(session, "set_disconnect_callback", None)
+        if callback is not None:
+            callback(lambda: self._disconnected_event(slot.binding))
+        self._emit("database_opened", slot.binding)
 
     def _check_running(self):
         if self._shutdown:
@@ -74,6 +106,7 @@ class InstanceRouter:
             ):
                 if self.registry.state(binding) not in {"closing", "attaching"}:
                     self.registry.retire(binding, state="unavailable")
+                    self._disconnected_event(binding)
         for record in records:
             if not record.compatible:
                 result.append(
@@ -105,8 +138,7 @@ class InstanceRouter:
         self.registry.set_state(slot.binding, "attaching")
         slot.phases[invocation] = "attaching"
         session = await self.provider.attach(slot.binding.identity, invocation)
-        slot.session = session
-        self._session_bindings[session] = slot.binding
+        self._adopt(slot, session)
         if (
             session.identity.key != slot.binding.identity.key
             or session.identity.provider != slot.binding.identity.provider
@@ -139,6 +171,8 @@ class InstanceRouter:
                             "Cached output's backend generation changed",
                         )
                 result = await session.request(invocation, method, params)
+                if method == "save_database":
+                    self._emit("database_saved", slot.binding)
                 if method == "tools/call":
                     result = self._own_output(result, slot)
                 return result
@@ -248,16 +282,18 @@ class InstanceRouter:
                 else self.registry.publish(session.identity)
             )
             slot = self._slot(binding)
+            reused = False
             async with slot.gate:
                 self.registry.resolve(binding.instance_id)
                 if slot.session is None:
-                    slot.session = session
-                    self._session_bindings[session] = binding
+                    self._adopt(slot, session)
                     session = None
                     if not self._shutdown:
                         self.registry.set_state(binding, "ready")
-                elif slot.session is session:
-                    session = None
+                else:
+                    reused = True
+                    if slot.session is session:
+                        session = None
                 if self._shutdown:
                     # Shutdown's final sweep owns a newly acquired session,
                     # including a failed release; never strand it in this task.
@@ -265,6 +301,8 @@ class InstanceRouter:
                     raise RoutingError(
                         "INSTANCE_CLOSED", "Server closed while database was opening."
                     )
+            if reused:
+                self._emit("database_reused", binding)
             return self.registry.describe(binding)
         finally:
             if session is not None and session not in self._session_bindings:
@@ -292,6 +330,13 @@ class InstanceRouter:
         return await asyncio.shield(task)
 
     async def _close(self, slot, save):
+        try:
+            return await self._drain_and_close(slot, save)
+        except BaseException:
+            self._emit("database_release_error", slot.binding)
+            raise
+
+    async def _drain_and_close(self, slot, save):
         calls = list(slot.calls.items())
         outcomes = await asyncio.gather(
             *(self._cancel(slot, invocation, task) for invocation, task in calls),
@@ -310,11 +355,13 @@ class InstanceRouter:
                     await slot.session.request(
                         Invocation(slot.binding), "save_database", {}
                     )
+                    self._emit("database_saved", slot.binding)
                 await slot.session.close()
                 slot.session = None
             if self._output_store is not None:
                 self._output_store.expire(slot.binding.instance_id)
             self.registry.retire(slot.binding)
+        self._emit("database_released", slot.binding)
         return {"closed": True, "instance_id": slot.binding.instance_id}
 
     async def close_database(self, instance_id: str, *, save: bool = False) -> dict:

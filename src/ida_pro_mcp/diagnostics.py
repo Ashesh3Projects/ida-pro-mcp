@@ -79,22 +79,7 @@ class RoutingTraceMiddleware(Middleware):
             **fields,
             elapsed_ms=(time.monotonic() - start) * 1000,
         )
-        data = result.structured_content or {}
-        if name in {"open_database", "idb_open"} and not result.is_error:
-            self.writer.emit(
-                "database_opened",
-                instance_id=data.get("instance_id"),
-                target={
-                    "idb_path": data.get("idb_path"),
-                    "exe_path": data.get("binary_path"),
-                    "backend": data.get("backend"),
-                },
-            )
-        if name in {"close_database", "idb_close"}:
-            self.writer.emit(
-                "database_release_error" if result.is_error else "database_released",
-                **fields,
-            )
-        if name in {"save_database", "idb_save"} and not result.is_error:
-            self.writer.emit("database_saved", **fields)
+        # Resource lifecycle events come from the router, not tool names:
+        # attachment, alias reuse and shutdown can happen without management
+        # tool calls, and failed close must be reported at the ownership layer.
         return result
