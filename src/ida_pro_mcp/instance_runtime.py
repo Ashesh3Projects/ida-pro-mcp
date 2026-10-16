@@ -21,9 +21,12 @@ class RuntimeIdentity:
         with self._lock:
             generation = secrets.token_hex(8)
             self._info = {
-                "instance_id": generation, "generation": generation,
-                "identity_version": 1, "pid": os.getpid(),
-                "binary_path": binary_path, "idb_path": idb_path,
+                "instance_id": generation,
+                "generation": generation,
+                "identity_version": 1,
+                "pid": os.getpid(),
+                "binary_path": binary_path,
+                "idb_path": idb_path,
                 "binary_name": os.path.basename(binary_path or idb_path),
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "status": "ready",
@@ -43,9 +46,14 @@ class RuntimeIdentity:
         with self._lock:
             actual = self._info.get("generation")
             if actual is None:
-                raise RoutingError("INSTANCE_CLOSED", "No database is open in this IDA runtime.")
+                raise RoutingError(
+                    "INSTANCE_CLOSED", "No database is open in this IDA runtime."
+                )
             if actual != expected:
-                raise RoutingError("INSTANCE_CHANGED", "The database or listener was replaced; rediscover its new instance_id.")
+                raise RoutingError(
+                    "INSTANCE_CHANGED",
+                    "The database or listener was replaced; rediscover its new instance_id.",
+                )
 
 
 _runtime = RuntimeIdentity()

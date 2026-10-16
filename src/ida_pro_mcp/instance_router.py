@@ -10,7 +10,14 @@ import os
 
 import anyio
 
-from .instance_contract import BackendProvider, BackendSession, InstanceBinding, Invocation, RoutingError, split_instance_uri
+from .instance_contract import (
+    BackendProvider,
+    BackendSession,
+    InstanceBinding,
+    Invocation,
+    RoutingError,
+    split_instance_uri,
+)
 from .instance_registry import InstanceRegistry
 from .output_store import OutputStore
 
@@ -37,7 +44,9 @@ async def finish_cleanup(task: asyncio.Task):
 
 
 class InstanceRouter:
-    def __init__(self, provider: BackendProvider, *, registry: InstanceRegistry | None = None):
+    def __init__(
+        self, provider: BackendProvider, *, registry: InstanceRegistry | None = None
+    ):
         self.provider = provider
         self.registry = registry or InstanceRegistry()
         self._slots: dict[str, _Slot] = {}
@@ -58,14 +67,23 @@ class InstanceRouter:
         result = []
         for binding in self.registry.bindings():
             slot = self._slots.get(binding.instance_id)
-            if (binding.identity.provider, binding.identity.key) not in seen and not (slot and slot.session):
+            if (binding.identity.provider, binding.identity.key) not in seen and not (
+                slot and slot.session
+            ):
                 if self.registry.state(binding) not in {"closing", "attaching"}:
                     self.registry.retire(binding, state="unavailable")
         for record in records:
             if not record.compatible:
-                result.append({"instance_id": None, "binary_name": record.binary_name,
-                               "idb_path": record.idb_path, "backend": record.backend,
-                               "status": "incompatible", "error_code": "INSTANCE_INCOMPATIBLE"})
+                result.append(
+                    {
+                        "instance_id": None,
+                        "binary_name": record.binary_name,
+                        "idb_path": record.idb_path,
+                        "backend": record.backend,
+                        "status": "incompatible",
+                        "error_code": "INSTANCE_INCOMPATIBLE",
+                    }
+                )
                 continue
             binding = self.registry.publish(record)
             result.append(self.registry.describe(binding))
@@ -86,9 +104,15 @@ class InstanceRouter:
         slot.phases[invocation] = "attaching"
         session = await self.provider.attach(slot.binding.identity, invocation)
         slot.session = session
-        if session.identity.key != slot.binding.identity.key or session.identity.provider != slot.binding.identity.provider:
+        if (
+            session.identity.key != slot.binding.identity.key
+            or session.identity.provider != slot.binding.identity.provider
+        ):
             self.registry.set_state(slot.binding, "closing")
-            raise RoutingError("INSTANCE_CHANGED", "Attachment returned a different database incarnation.")
+            raise RoutingError(
+                "INSTANCE_CHANGED",
+                "Attachment returned a different database incarnation.",
+            )
         if self.registry.state(slot.binding) != "closing":
             self.registry.set_state(slot.binding, "ready")
         return session
@@ -107,7 +131,10 @@ class InstanceRouter:
                 if method == "output/read":
                     expected = params.pop("expected_generation", None)
                     if expected != session.runtime_generation:
-                        raise RoutingError("INSTANCE_CHANGED", "Cached output's backend generation changed")
+                        raise RoutingError(
+                            "INSTANCE_CHANGED",
+                            "Cached output's backend generation changed",
+                        )
                 result = await session.request(invocation, method, params)
                 if method == "tools/call":
                     result = self._own_output(result, slot)
@@ -133,13 +160,17 @@ class InstanceRouter:
         binding = self.registry.resolve(instance_id)
         slot = self._slot(binding)
         invocation = Invocation(binding)
-        worker = asyncio.create_task(self._run(slot, invocation, method, deepcopy(params)))
+        worker = asyncio.create_task(
+            self._run(slot, invocation, method, deepcopy(params))
+        )
         slot.calls[invocation] = worker
         slot.phases[invocation] = "queued"
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
-            await finish_cleanup(asyncio.create_task(self._cancel(slot, invocation, worker)))
+            await finish_cleanup(
+                asyncio.create_task(self._cancel(slot, invocation, worker))
+            )
             raise
 
     def _own_output(self, result, slot):
@@ -148,28 +179,58 @@ class InstanceRouter:
         metadata["instance_id"] = slot.binding.instance_id
         backend_id = metadata.get("output_id")
         if isinstance(backend_id, str):
-            output_id = self._output_store.remember(slot.binding, slot.session.runtime_generation, backend_id, slot.binding.instance_id)
+            output_id = self._output_store.remember(
+                slot.binding,
+                slot.session.runtime_generation,
+                backend_id,
+                slot.binding.instance_id,
+            )
             metadata["output_id"] = output_id
             metadata.pop("download_url", None)
             hint = f'Output truncated. Use read_output(instance_id="{slot.binding.instance_id}", output_id="{output_id}", offset=0, limit=32000).'
             metadata["download_hint"] = hint
-            result["content"] = result.get("content", [])[:1] + [{"type": "text", "text": hint}]
+            result["content"] = result.get("content", [])[:1] + [
+                {"type": "text", "text": hint}
+            ]
         return result
 
-    async def read_output(self, instance_id: str, output_id: str, offset: int = 0, limit: int = 32000):
-        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 32000:
-            raise ValueError("offset must be nonnegative and limit must be between 1 and 32000")
+    async def read_output(
+        self, instance_id: str, output_id: str, offset: int = 0, limit: int = 32000
+    ):
+        if (
+            type(offset) is not int
+            or offset < 0
+            or type(limit) is not int
+            or not 1 <= limit <= 32000
+        ):
+            raise ValueError(
+                "offset must be nonnegative and limit must be between 1 and 32000"
+            )
         output = self._output_store.lookup(instance_id, output_id)
-        result = await self.request(instance_id, "output/read", {
-            "output_id": output.backend_output_id, "expected_generation": output.runtime_generation})
+        result = await self.request(
+            instance_id,
+            "output/read",
+            {
+                "output_id": output.backend_output_id,
+                "expected_generation": output.runtime_generation,
+            },
+        )
         text = result["text"]
         end = min(offset + limit, len(text))
-        return {"instance_id": instance_id, "output_id": output_id, "offset": offset,
-                "text": text[offset:end], "total_chars": len(text), "next_offset": end if end < len(text) else None}
+        return {
+            "instance_id": instance_id,
+            "output_id": output_id,
+            "offset": offset,
+            "text": text[offset:end],
+            "total_chars": len(text),
+            "next_offset": end if end < len(text) else None,
+        }
 
     async def read_resource(self, uri: str):
         backend_uri, instance_id = split_instance_uri(uri)
-        result = deepcopy(await self.request(instance_id, "resources/read", {"uri": backend_uri}))
+        result = deepcopy(
+            await self.request(instance_id, "resources/read", {"uri": backend_uri})
+        )
         for content in result.get("contents", []):
             content["uri"] = uri
         return result
@@ -182,7 +243,9 @@ class InstanceRouter:
             async with slot.gate:
                 self.registry.resolve(binding.instance_id)
                 if self._shutdown:
-                    raise RoutingError("INSTANCE_CLOSED", "Server closed while database was opening.")
+                    raise RoutingError(
+                        "INSTANCE_CLOSED", "Server closed while database was opening."
+                    )
                 if slot.session is None:
                     slot.session = session
                     session = None
@@ -203,24 +266,35 @@ class InstanceRouter:
         if task is None or task.done():
             task = asyncio.create_task(self._open(path, options))
             self._opens[key] = task
+
             def finished(done):
                 if self._opens.get(key) is done:
                     self._opens.pop(key, None)
                 if not done.cancelled():
                     done.exception()  # Observe failures if all callers cancelled.
+
             task.add_done_callback(finished)
         return await asyncio.shield(task)
 
     async def _close(self, slot, save):
         calls = list(slot.calls.items())
-        outcomes = await asyncio.gather(*(self._cancel(slot, invocation, task) for invocation, task in calls), return_exceptions=True)
-        failures = [r for r in outcomes if isinstance(r, Exception) and not isinstance(r, RoutingError)]
+        outcomes = await asyncio.gather(
+            *(self._cancel(slot, invocation, task) for invocation, task in calls),
+            return_exceptions=True,
+        )
+        failures = [
+            r
+            for r in outcomes
+            if isinstance(r, Exception) and not isinstance(r, RoutingError)
+        ]
         if failures:
             raise ExceptionGroup("Database operations did not drain", failures)
         async with slot.gate:
             if slot.session is not None:
                 if save:
-                    await slot.session.request(Invocation(slot.binding), "save_database", {})
+                    await slot.session.request(
+                        Invocation(slot.binding), "save_database", {}
+                    )
                 await slot.session.close()
                 slot.session = None
             if self._output_store is not None:
@@ -241,8 +315,17 @@ class InstanceRouter:
         opens = list(self._opens.values())
         if opens:
             await asyncio.gather(*opens, return_exceptions=True)
-        targets = [b for b in self.registry.bindings() if self.registry.state(b) not in {"closed", "unavailable", "incompatible"}]
-        results = await asyncio.gather(*(self.close_database(b.instance_id) for b in targets), return_exceptions=True)
+        targets = [
+            b
+            for b in self.registry.bindings()
+            if self.registry.state(b) not in {"closed", "unavailable", "incompatible"}
+        ]
+        results = await asyncio.gather(
+            *(self.close_database(b.instance_id) for b in targets),
+            return_exceptions=True,
+        )
         errors = [result for result in results if isinstance(result, Exception)]
         if errors:
-            raise ExceptionGroup("Some IDA database leases could not be released", errors)
+            raise ExceptionGroup(
+                "Some IDA database leases could not be released", errors
+            )

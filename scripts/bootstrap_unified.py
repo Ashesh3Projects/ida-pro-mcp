@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Sequence
 
 RECEIPT_NAME = "ida-pro-mcp-bootstrap-receipt.json"
+FRONTEND_REQUIREMENTS = (
+    "fastmcp==4.1.0",
+    "fastmcp-slim==4.1.0",
+    "mcp==2.3.0",
+    "mcp-types==2.3.0",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -242,6 +248,18 @@ def write_receipt(
         "python": python,
         "repository": str(repo_root.resolve()),
         "installed": installed,
+        "frontend_requirements": list(FRONTEND_REQUIREMENTS),
+        "frontend_wheels": [
+            {
+                "distribution": _wheel_identity(wheel)[0],
+                "version": _wheel_identity(wheel)[1],
+                "wheel": wheel.name,
+                "sha256": _sha256(wheel),
+            }
+            for wheel in sorted(wheel_dir.glob("*.whl"))
+            if _wheel_identity(wheel)[0]
+            in {"fastmcp", "fastmcp-slim", "mcp", "mcp-types"}
+        ],
         "sources": [
             {
                 "distribution": spec.distribution,
@@ -333,6 +351,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     wheel_dir = args.wheel_dir.resolve()
     built = build_dependencies(args.python, wheel_dir)
+    _run(
+        [
+            args.python,
+            "-m",
+            "pip",
+            "download",
+            "--only-binary=:all:",
+            "--no-deps",
+            "--dest",
+            str(wheel_dir),
+            *FRONTEND_REQUIREMENTS,
+        ]
+    )
     if args.install:
         _run(
             build_install_command(args.python, [wheel for _, wheel in built], repo_root)

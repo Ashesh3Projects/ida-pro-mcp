@@ -86,6 +86,9 @@ class IDASessionManager:
 
             logger.info(f"Opening database: {input_path} (session: {session_id})")
             self._activate_database_path(str(input_path), run_auto_analysis)
+            # This process owns only one live database. Closed metadata cannot
+            # resurrect a prior database through an old session handle.
+            self._sessions.clear()
 
             session = IDASession(
                 session_id=session_id,
@@ -180,7 +183,9 @@ class IDASessionManager:
     def _close_active_database(self) -> None:
         runtime_identity().invalidate()
         if self._active_session_id is not None:
-            logger.debug("Closing active database (session: %s)", self._active_session_id)
+            logger.debug(
+                "Closing active database (session: %s)", self._active_session_id
+            )
             idapro.close_database()
             self._active_session_id = None
 

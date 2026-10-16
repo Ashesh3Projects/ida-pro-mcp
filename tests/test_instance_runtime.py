@@ -4,7 +4,11 @@ import pytest
 
 from ida_pro_mcp.instance_contract import RoutingError
 from ida_pro_mcp import instance_runtime
-from ida_pro_mcp.instance_runtime import RuntimeIdentity, generation_context, check_request_generation
+from ida_pro_mcp.instance_runtime import (
+    RuntimeIdentity,
+    generation_context,
+    check_request_generation,
+)
 
 
 def test_same_path_reopen_rejects_queued_generation(monkeypatch):

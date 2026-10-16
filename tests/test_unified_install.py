@@ -125,6 +125,7 @@ def test_runtime_paths_prefer_pinned_matching_abi(tmp_path, monkeypatch):
 
 def test_non_object_plugin_manifest_does_not_break_discovery(tmp_path):
     from ida_pro_mcp.official_adapter import _canonical_gui_plugin_installed
+
     for document in ("[]", "null", '"invalid"'):
         (tmp_path / "ida-pro-mcp-runtime.json").write_text(document)
         assert _canonical_gui_plugin_installed(tmp_path) is False
@@ -132,13 +133,16 @@ def test_non_object_plugin_manifest_does_not_break_discovery(tmp_path):
 
 def test_installer_honors_explicit_idausr(tmp_path, monkeypatch):
     from ida_pro_mcp import installer
-    primary=tmp_path/"custom-user"
-    secondary=tmp_path/"fallback"
-    monkeypatch.setenv("IDAUSR",str(primary)+os.pathsep+str(secondary))
+
+    primary = tmp_path / "custom-user"
+    secondary = tmp_path / "fallback"
+    monkeypatch.setenv("IDAUSR", str(primary) + os.pathsep + str(secondary))
     assert Path(installer._get_ida_user_dir()) == primary
 
 
-def test_mismatched_abi_manifest_does_not_load_external_binary_packages(tmp_path, monkeypatch):
+def test_mismatched_abi_manifest_does_not_load_external_binary_packages(
+    tmp_path, monkeypatch
+):
     """A GUI on Python 3.11 must not import a client's Python 3.12 site-packages."""
     fake_idaapi = ModuleType("idaapi")
     fake_idaapi.Form = SimpleNamespace
@@ -147,18 +151,20 @@ def test_mismatched_abi_manifest_does_not_load_external_binary_packages(tmp_path
     fake_idaapi.PLUGIN_KEEP = 0
     fake_kernwin = ModuleType("ida_kernwin")
     fake_kernwin.UI_Hooks = object
-    monkeypatch.setitem(sys.modules,"idaapi",fake_idaapi)
-    monkeypatch.setitem(sys.modules,"ida_kernwin",fake_kernwin)
-    monkeypatch.setitem(sys.modules,"ida_netnode",ModuleType("ida_netnode"))
-    spec=importlib.util.spec_from_file_location("_loader_abi_test",installer.IDA_PLUGIN_LOADER)
-    loader=importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "idaapi", fake_idaapi)
+    monkeypatch.setitem(sys.modules, "ida_kernwin", fake_kernwin)
+    monkeypatch.setitem(sys.modules, "ida_netnode", ModuleType("ida_netnode"))
+    spec = importlib.util.spec_from_file_location(
+        "_loader_abi_test", installer.IDA_PLUGIN_LOADER
+    )
+    loader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loader)
-    external=tmp_path/"other-python-site-packages"
+    external = tmp_path / "other-python-site-packages"
     external.mkdir()
-    (tmp_path/"ida-pro-mcp-runtime.json").write_text(json.dumps({
-        "python_version":[3,99],"site_packages":[str(external)]
-    }))
-    monkeypatch.setattr(loader,"__file__",str(tmp_path/"ida_mcp.py"))
-    monkeypatch.setattr(sys,"path",list(sys.path))
+    (tmp_path / "ida-pro-mcp-runtime.json").write_text(
+        json.dumps({"python_version": [3, 99], "site_packages": [str(external)]})
+    )
+    monkeypatch.setattr(loader, "__file__", str(tmp_path / "ida_mcp.py"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
     loader._configure_runtime_paths()
     assert str(external) not in sys.path

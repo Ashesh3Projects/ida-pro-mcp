@@ -7,7 +7,6 @@ the IDA thread once the old service has drained.
 
 import sys
 import threading
-import time
 
 from .instance_runtime import runtime_identity
 
@@ -24,6 +23,7 @@ def guard_runtime(runtime, generation):
         def execute():
             runtime_identity().check(generation)
             return function()
+
         return original(execute, *args, **kwargs)
 
     runtime._run_sync = guarded
@@ -69,6 +69,7 @@ def refresh_gui_service():
             analysis.join()
         server.stop()
         import ida_kernwin
+
         def finish():
             global _retiring
             try:
@@ -79,10 +80,13 @@ def refresh_gui_service():
                         plugin.init(owner="ida-pro-mcp")
                         plugin.start()
                         next_runtime = plugin._component._runtime
-                        guard_runtime(next_runtime, runtime_identity().snapshot()["generation"])
+                        guard_runtime(
+                            next_runtime, runtime_identity().snapshot()["generation"]
+                        )
             finally:
                 _retiring = False
             return 1
+
         ida_kernwin.execute_sync(finish, ida_kernwin.MFF_FAST | ida_kernwin.MFF_NOWAIT)
 
     threading.Thread(target=drain, name="ida-mcp-database-retire", daemon=True).start()

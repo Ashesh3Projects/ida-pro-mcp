@@ -119,7 +119,9 @@ class _Bridge:
                     self.send_error(400, "Request body is not allowed")
                     return
                 try:
-                    generation = require_instance_id(self.headers.get("X-IDA-MCP-Generation"))
+                    generation = require_instance_id(
+                        self.headers.get("X-IDA-MCP-Generation")
+                    )
                     database_identity().check(generation)
                 except RoutingError as error:
                     self.send_error(409, str(error))
@@ -148,7 +150,9 @@ class _Bridge:
     def descriptor(self):
         identity = database_identity().snapshot()
         if not identity:
-            raise RoutingError("INSTANCE_CLOSED", "No database is open for this bridge.")
+            raise RoutingError(
+                "INSTANCE_CLOSED", "No database is open for this bridge."
+            )
         return {
             "host": "127.0.0.1",
             "port": self.http.server_port,
@@ -293,7 +297,10 @@ class _Bridge:
         try:
             internal = {**request, "id": key} if "id" in request else request
             if client:
-                with self.context.bridge_context(client, event), generation_context(generation):
+                with (
+                    self.context.bridge_context(client, event),
+                    generation_context(generation),
+                ):
                     with self.lock:
                         self.clients.add(client)
                     response = registry.dispatch(internal)

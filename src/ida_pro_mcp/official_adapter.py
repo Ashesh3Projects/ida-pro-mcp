@@ -7,8 +7,7 @@ ZeroMCP internals: the fork already returns complete MCP result envelopes.
 
 import json
 import sys
-from copy import deepcopy
-from importlib.metadata import distributions, version
+from importlib.metadata import distributions
 from pathlib import Path
 
 

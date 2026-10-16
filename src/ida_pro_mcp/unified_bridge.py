@@ -60,7 +60,9 @@ class Endpoint:
             raise ValueError("invalid IDA bridge port")
         if not isinstance(token, str) or not token or any(c in token for c in "\r\n"):
             raise ValueError("invalid IDA bridge credential")
-        return cls("127.0.0.1", port, token, require_instance_id(value.get("generation")))
+        return cls(
+            "127.0.0.1", port, token, require_instance_id(value.get("generation"))
+        )
 
 
 @dataclass(eq=False)
@@ -131,7 +133,13 @@ class UnifiedBridge:
         request = {
             "jsonrpc": "2.0",
             "method": method,
-            "params": {**params, "_meta": {"ida_pro_mcp_client": client_id, "ida_pro_mcp_generation": endpoint.generation}},
+            "params": {
+                **params,
+                "_meta": {
+                    "ida_pro_mcp_client": client_id,
+                    "ida_pro_mcp_generation": endpoint.generation,
+                },
+            },
         }
         if request_id is not None:
             request["id"] = request_id
@@ -253,11 +261,11 @@ class UnifiedBridge:
             # its Nexus lease alive. Explicit reopen starts a fresh namespace.
             self.release_target(invocation.target)
 
-    async def request(
-        self, method: str, params: dict, instance_id: str
-    ) -> Any:
+    async def request(self, method: str, params: dict, instance_id: str) -> Any:
         if not isinstance(instance_id, str) or not instance_id:
-            raise RoutingError("INSTANCE_ID_REQUIRED", "Explicit bridge target is required")
+            raise RoutingError(
+                "INSTANCE_ID_REQUIRED", "Explicit bridge target is required"
+            )
         invocation = Invocation(target=instance_id)
         with self._lock:
             if self._shutdown:
@@ -277,9 +285,7 @@ class UnifiedBridge:
                 await worker
             raise
 
-    async def call_tool(
-        self, name: str, arguments: dict, instance_id: str
-    ) -> dict:
+    async def call_tool(self, name: str, arguments: dict, instance_id: str) -> dict:
         return await self.request(
             "tools/call", {"name": name, "arguments": arguments}, instance_id
         )
@@ -390,7 +396,9 @@ class UnifiedBridge:
                 error.add_note(f"IDA database target: {target}")
                 errors.append(error)
         if errors:
-            raise ExceptionGroup("IDA bridge shutdown did not release every target", errors)
+            raise ExceptionGroup(
+                "IDA bridge shutdown did not release every target", errors
+            )
 
     def reopen_target(self, target: str) -> None:
         with self._lock:
@@ -406,9 +414,15 @@ class UnifiedBridge:
         target = self.manager.resolve_instance_id(instance_id)
         with self._lock:
             if self._shutdown or target in self._closed:
-                raise RoutingError("INSTANCE_CLOSED", "Output belongs to a closed database")
+                raise RoutingError(
+                    "INSTANCE_CLOSED", "Output belongs to a closed database"
+                )
             endpoint = self._endpoints.get(target)
         if endpoint is None:
-            raise RoutingError("OUTPUT_EXPIRED", "Output endpoint is no longer available")
-        data = await asyncio.to_thread(self._http, endpoint, "GET", f"/output/{quote(output_id, safe='')}.json")
+            raise RoutingError(
+                "OUTPUT_EXPIRED", "Output endpoint is no longer available"
+            )
+        data = await asyncio.to_thread(
+            self._http, endpoint, "GET", f"/output/{quote(output_id, safe='')}.json"
+        )
         return data.decode("utf-8")

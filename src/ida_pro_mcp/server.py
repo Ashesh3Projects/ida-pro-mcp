@@ -1,13 +1,24 @@
 """Legacy GUI command compatibility with request-specific FastMCP routing."""
+
 import argparse
 from urllib.parse import parse_qs, urlparse
 
 if __package__ in (None, ""):
     import sys
     from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ida_pro_mcp.installer import list_available_clients, print_mcp_config, run_install_command, set_ida_rpc
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    # Executing this file directly otherwise makes its sibling ida_mcp package
+    # shadow the separate official distribution used by diagnostic helpers.
+    script_dir = str(Path(__file__).resolve().parent)
+    sys.path[:] = [entry for entry in sys.path if entry != script_dir]
+
+from ida_pro_mcp.installer import (
+    list_available_clients,
+    print_mcp_config,
+    run_install_command,
+    set_ida_rpc,
+)
 from ida_pro_mcp.instance_router import InstanceRouter
 from ida_pro_mcp.proxy_backend import ProxyProvider
 from ida_pro_mcp.fastmcp_frontend import create_server
@@ -17,7 +28,9 @@ DEFAULT_IDA_RPC = "http://127.0.0.1:13337"
 
 def create_proxy_server(*, endpoint=None, extensions=None, profile=None):
     provider = ProxyProvider(endpoint=endpoint, extensions=extensions)
-    return create_server(InstanceRouter(provider), extensions=extensions, profile=profile)
+    return create_server(
+        InstanceRouter(provider), extensions=extensions, profile=profile
+    )
 
 
 def main():
@@ -92,7 +105,9 @@ def main():
         if target.hostname is None or target.port is None:
             parser.error("--ida-rpc requires a host and port")
         endpoint = (target.hostname, target.port)
-        extensions = set(filter(None, parse_qs(target.query).get("ext", [""])[0].split(",")))
+        extensions = set(
+            filter(None, parse_qs(target.query).get("ext", [""])[0].split(","))
+        )
         set_ida_rpc(*endpoint)
 
     is_install = args.install is not None
@@ -120,6 +135,9 @@ def main():
         return
 
     server = create_proxy_server(endpoint=endpoint, extensions=extensions)
+    from ida_pro_mcp.diagnostics import TraceWriter, RoutingTraceMiddleware
+
+    server.add_middleware(RoutingTraceMiddleware(TraceWriter()))
     transport = args.transport or "stdio"
     if transport == "stdio":
         server.run(transport="stdio", show_banner=False)
@@ -127,10 +145,17 @@ def main():
         url = urlparse(transport)
         if url.hostname is None or url.port is None:
             parser.error("Invalid transport URL")
-        server.run(transport="http", host=url.hostname, port=url.port,
-                   path="/mcp", json_response=False, stateless_http=False,
-                   host_origin_protection=True,
-                   allowed_hosts=[url.hostname, "localhost", "127.0.0.1", "::1"], show_banner=False)
+        server.run(
+            transport="http",
+            host=url.hostname,
+            port=url.port,
+            path="/mcp",
+            json_response=False,
+            stateless_http=False,
+            host_origin_protection=True,
+            allowed_hosts=[url.hostname, "localhost", "127.0.0.1", "::1"],
+            show_banner=False,
+        )
 
 
 if __name__ == "__main__":

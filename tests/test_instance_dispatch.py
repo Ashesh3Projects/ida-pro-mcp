@@ -1,5 +1,4 @@
 import importlib
-import json
 
 import pytest
 
@@ -34,15 +33,23 @@ def endpoint(monkeypatch):
 
 
 def call(server, arguments):
-    return server.registry.dispatch({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
-                                     "params": {"name": "analyze", "arguments": arguments}})
+    return server.registry.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "analyze", "arguments": arguments},
+        }
+    )
 
 
 def test_missing_id_does_not_reach_tool(endpoint):
     server, _, _, calls = endpoint
     response = call(server, {"value": 2})
     assert response["result"]["isError"]
-    assert response["result"]["_meta"]["ida_mcp"]["error_code"] == "INSTANCE_ID_REQUIRED"
+    assert (
+        response["result"]["_meta"]["ida_mcp"]["error_code"] == "INSTANCE_ID_REQUIRED"
+    )
     assert calls == []
 
 
@@ -65,18 +72,39 @@ def test_stale_id_fails_after_database_replacement(endpoint):
 
 def test_direct_catalog_and_discovery_are_explicit(endpoint):
     server, _, generation, _ = endpoint
-    tools = server.registry.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    tools = server.registry.dispatch(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    )["result"]["tools"]
     analyze = next(t for t in tools if t["name"] == "analyze")
     assert "instance_id" in analyze["inputSchema"]["required"]
-    result = server.registry.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_instances", "arguments": {}}})
-    assert result["result"]["structuredContent"]["instances"][0]["instance_id"] == generation
+    result = server.registry.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "list_instances", "arguments": {}},
+        }
+    )
+    assert (
+        result["result"]["structuredContent"]["instances"][0]["instance_id"]
+        == generation
+    )
 
 
 def test_resource_requires_one_id_and_restores_uri(endpoint):
     server, _, generation, _ = endpoint
     uri = f"ida://idb/metadata?instance_id={generation}"
-    response = server.registry.dispatch({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}})
+    response = server.registry.dispatch(
+        {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}}
+    )
     assert response["result"]["contents"][0]["uri"] == uri
     for bad in ["ida://idb/metadata", uri + "&instance_id=" + generation]:
-        response = server.registry.dispatch({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": bad}})
+        response = server.registry.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "resources/read",
+                "params": {"uri": bad},
+            }
+        )
         assert "error" in response

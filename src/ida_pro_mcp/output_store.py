@@ -26,7 +26,9 @@ class OutputStore:
     def remember(self, binding, runtime_generation, backend_output_id, context_id):
         output_id = secrets.token_hex(16)
         with self._lock:
-            self._outputs[output_id] = OutputReference(output_id, binding, runtime_generation, backend_output_id, context_id)
+            self._outputs[output_id] = OutputReference(
+                output_id, binding, runtime_generation, backend_output_id, context_id
+            )
             while len(self._outputs) > self._max:
                 self._outputs.popitem(last=False)
         return output_id
@@ -38,11 +40,21 @@ class OutputStore:
         with self._lock:
             output = self._outputs.get(output_id)
             if output is None:
-                raise RoutingError("OUTPUT_EXPIRED", "Output is unknown or expired; request it again from its instance.")
+                raise RoutingError(
+                    "OUTPUT_EXPIRED",
+                    "Output is unknown or expired; request it again from its instance.",
+                )
             if output.binding.instance_id != instance_id:
-                raise RoutingError("OUTPUT_INSTANCE_MISMATCH", "This output belongs to a different instance_id.")
+                raise RoutingError(
+                    "OUTPUT_INSTANCE_MISMATCH",
+                    "This output belongs to a different instance_id.",
+                )
             return output
 
     def expire(self, instance_id):
         with self._lock:
-            self._outputs = OrderedDict((key, value) for key, value in self._outputs.items() if value.binding.instance_id != instance_id)
+            self._outputs = OrderedDict(
+                (key, value)
+                for key, value in self._outputs.items()
+                if value.binding.instance_id != instance_id
+            )

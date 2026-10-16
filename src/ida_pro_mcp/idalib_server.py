@@ -29,7 +29,7 @@ from ida_pro_mcp.worker_lifecycle import WorkerLifecycle
 
 
 class IdalibSessionInfo(TypedDict):
-    session_id: str
+    instance_id: str
     input_path: str
     filename: str
     created_at: str
@@ -75,6 +75,7 @@ def _register_in_discovery(host: str, port: int, input_path: Path) -> None:
     global _REGISTERED_PORT
     try:
         from ida_pro_mcp.instance_runtime import runtime_identity
+
         identity = runtime_identity().snapshot()
         register_instance(
             host=host,
@@ -149,12 +150,17 @@ def idb_open(
         _LIFECYCLE.set_idle_ttl(float(idle_ttl_sec), time.monotonic() - load_started_at)
         if _BOUND_HOST and _BOUND_PORT:
             _register_in_discovery(_BOUND_HOST, _BOUND_PORT, session.input_path)
+        from ida_pro_mcp.instance_runtime import runtime_identity
+
+        public_session = session.to_dict()
+        public_session.pop("session_id", None)
+        public_session["instance_id"] = runtime_identity().snapshot()["instance_id"]
         return {
             "success": True,
-            "session": session.to_dict(),
+            "session": public_session,
             "warmup": warmup,
             "message": (
-                f"Binary opened: {session.input_path.name} ({opened_session_id})"
+                f"Binary opened: {session.input_path.name} ({public_session['instance_id']})"
             ),
         }
     except (FileNotFoundError, RuntimeError, ValueError) as e:
@@ -168,8 +174,10 @@ def idb_list() -> IdalibListResult:
     """List open IDA sessions."""
 
     try:
-        manager = get_session_manager()
-        sessions = manager.list_sessions()
+        from ida_pro_mcp.instance_runtime import runtime_identity
+
+        info = runtime_identity().snapshot()
+        sessions = [info] if info else []
         return {"sessions": sessions, "count": len(sessions)}
     except Exception as e:
         return {"error": f"Failed to list sessions: {e}"}
@@ -178,6 +186,7 @@ def idb_list() -> IdalibListResult:
 def _install_dispatch_hook() -> None:
     """Wrap the registry dispatcher so every request bumps the watchdog timer."""
     from ida_pro_mcp.ida_mcp.instance_dispatch import install_instance_dispatch
+
     install_instance_dispatch(MCP_SERVER)
     original = MCP_SERVER.registry.dispatch
 

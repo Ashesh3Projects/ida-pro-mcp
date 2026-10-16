@@ -67,9 +67,17 @@ class _FakeSupervisor(supmod.IdalibSupervisor):
                 },
             }
         if method == "resources/list":
-            return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"resources": []}}
+            return {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {"resources": []},
+            }
         if method == "resources/templates/list":
-            return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"resourceTemplates": []}}
+            return {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {"resourceTemplates": []},
+            }
         self.forwarded.append(payload)
         return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"ok": True}}
 
@@ -139,26 +147,32 @@ def test_supervisor_import_does_not_import_ida_modules():
         (["--no-unsafe"], "--no-unsafe"),
     ],
 )
-def test_cli_forwards_unsafe_choice_to_spawned_worker(monkeypatch, flags, expected_flag):
+def test_cli_forwards_unsafe_choice_to_spawned_worker(
+    monkeypatch, flags, expected_flag
+):
+    # Import the actual frontend before replacing subprocess.Popen at the
+    # process-creation boundary; SDK class annotations inspect that type.
+    from ida_pro_mcp import fastmcp_frontend
+
     commands = []
 
     def start_process(command, **kwargs):
         commands.append(command)
         return _FakeProcess()
 
-    server = supmod.McpServer("test")
     monkeypatch.setattr(sys, "argv", ["idalib-mcp", "--stdio", *flags])
-    monkeypatch.setattr(supmod.signal, "signal", lambda *_args: None)
     monkeypatch.setattr(supmod.subprocess, "Popen", start_process)
     monkeypatch.setattr(
         supmod.IdalibSupervisor, "_wait_worker_ready", lambda *_args: None
     )
-    from ida_pro_mcp import fastmcp_frontend
+
     def capture_frontend(router, **kwargs):
         class Host:
             def run(self, **options):
                 router.provider.supervisor._schema_or_idle_worker()
+
         return Host()
+
     monkeypatch.setattr(fastmcp_frontend, "create_server", capture_frontend)
 
     supmod.main()
@@ -266,8 +280,6 @@ def test_open_session_cleans_new_parts_after_worker_failure(tmp_path):
     assert packed.read_bytes() == b"packed database"
 
 
-
-
 def test_worker_tools_inject_database_and_filter_management_tools():
     sup = _FakeSupervisor()
     tools = sup.worker_tools()
@@ -278,14 +290,6 @@ def test_worker_tools_inject_database_and_filter_management_tools():
         schema = tool["inputSchema"]
         assert "instance_id" in schema["required"]
         assert "database" not in schema["properties"]
-
-
-
-
-
-
-
-
 
 
 def test_open_session_rejects_unknown_mode(tmp_path):
@@ -320,7 +324,9 @@ def test_open_session_prefer_headless_skips_gui_discovery(tmp_path):
     )
     try:
         sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="sample", mode="prefer_headless")
+        session = sup.open_session(
+            str(sample), session_id="sample", mode="prefer_headless"
+        )
         assert session.backend == "worker"
         assert sup.opened, "expected the worker to be invoked despite a running GUI"
     finally:
@@ -347,7 +353,9 @@ def test_open_session_force_headless_ignores_running_gui(tmp_path):
     )
     try:
         sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="sample", mode="force_headless")
+        session = sup.open_session(
+            str(sample), session_id="sample", mode="force_headless"
+        )
         assert session.backend == "worker"
     finally:
         restore()
@@ -402,7 +410,9 @@ def test_idb_list_includes_unadopted_gui_instances(tmp_path, monkeypatch):
             }
         ],
     )
-    monkeypatch.setattr(supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True
+    )
 
     listed = sup.list_sessions()
     by_id = {entry["session_id"]: entry for entry in listed}
@@ -432,7 +442,9 @@ def test_idb_list_reports_unadopted_worker_instances_as_workers(tmp_path, monkey
             }
         ],
     )
-    monkeypatch.setattr(supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True
+    )
 
     listed = _FakeSupervisor().list_sessions()
 
@@ -463,7 +475,9 @@ def test_prefer_headless_adopts_only_registered_worker_backend(tmp_path):
     )
     try:
         sup = _FakeSupervisor()
-        session = sup.open_session(str(sample), session_id="sample", mode="prefer_headless")
+        session = sup.open_session(
+            str(sample), session_id="sample", mode="prefer_headless"
+        )
         assert session.backend == "worker"
         assert session.owned is True
         assert sup.opened, "legacy GUI registration should not be adopted as a worker"
@@ -492,7 +506,9 @@ def test_idb_list_omits_unadopted_when_already_adopted(tmp_path, monkeypatch):
     try:
         sup = _FakeSupervisor()
         sup.open_session(str(sample), session_id="gui", mode="prefer_gui")
-        monkeypatch.setattr(supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(
+            supmod._discovery, "probe_instance", lambda *_args, **_kwargs: True
+        )
         listed = sup.list_sessions()
         assert all(entry["adopted"] for entry in listed)
         assert len(listed) == 1
@@ -562,8 +578,6 @@ def test_resolve_session_requires_database():
             assert "session ID is required" in str(e)
         else:
             raise AssertionError(f"expected RuntimeError for database={value!r}")
-
-
 
 
 def test_open_session_reuses_schema_worker(tmp_path):
@@ -711,7 +725,9 @@ def test_open_session_prunes_unreachable_existing_mapping(tmp_path):
         with sup._lock:
             sup._register_session_locked(stale, str(sample.resolve()))
 
-        sup._session_is_reachable = lambda session: session.session_id != "stale" and session.is_alive()
+        sup._session_is_reachable = lambda session: (
+            session.session_id != "stale" and session.is_alive()
+        )
 
         session = sup.open_session(str(sample), session_id="new")
 
@@ -764,8 +780,12 @@ def test_probe_session_health_reports_rpc_ping_failure(monkeypatch):
         def __exit__(self, *_args):
             return False
 
-    monkeypatch.setattr(supmod.socket, "create_connection", lambda *_args, **_kwargs: _FakeSocket())
-    sup._worker_rpc = lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("rpc timeout"))
+    monkeypatch.setattr(
+        supmod.socket, "create_connection", lambda *_args, **_kwargs: _FakeSocket()
+    )
+    sup._worker_rpc = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        TimeoutError("rpc timeout")
+    )
 
     health = sup._probe_session_health(worker)
 
@@ -844,7 +864,8 @@ def test_resolve_session_does_not_retry_probe_on_busy_worker(monkeypatch):
     probes = []
     original = sup._probe_session_health
     sup._probe_session_health = lambda *a, **kw: (
-        probes.append(kw), original(*a, **kw)
+        probes.append(kw),
+        original(*a, **kw),
     )[1]
 
     sup.resolve_session("worker")
@@ -894,8 +915,6 @@ def test_list_sessions_marks_busy_worker_active(monkeypatch):
 
     assert entry["is_active"] is True
     assert entry["busy"] is True
-
-
 
 
 def test_list_sessions_reports_is_active_from_health_probe(tmp_path):
@@ -1051,10 +1070,6 @@ def test_close_session_skips_save_when_unreachable(tmp_path):
     assert session.process.returncode == 0
 
 
-
-
-
-
 def test_supervisor_uses_idb_prefixed_management_tools_only():
     """No legacy names should leak into IDB_MANAGEMENT_TOOLS or module symbols."""
     legacy = {
@@ -1199,12 +1214,6 @@ def test_open_session_race_rejects_duplicate_session_id_for_different_path(tmp_p
         assert sup.spawned[0].process.returncode == 0
     finally:
         restore()
-
-
-
-
-
-
 
 
 def test_probe_reports_busy_adopted_worker_as_busy(monkeypatch):

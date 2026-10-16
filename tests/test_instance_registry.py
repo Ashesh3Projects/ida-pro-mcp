@@ -6,15 +6,25 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from ida_pro_mcp.instance_contract import BackendIdentity, RoutingError, require_instance_id
+from ida_pro_mcp.instance_contract import (
+    BackendIdentity,
+    RoutingError,
+    require_instance_id,
+)
 from ida_pro_mcp.instance_registry import InstanceRegistry
 
 
 def identity(key="runtime-a", **changes):
     return BackendIdentity(
-        provider="fake", key=key, backend="gui", binary_name="sample.exe",
-        binary_path="/samples/sample.exe", idb_path="/samples/sample.i64",
-        pid=42, started_at="2026-10-16T00:00:00Z", **changes,
+        provider="fake",
+        key=key,
+        backend="gui",
+        binary_name="sample.exe",
+        binary_path="/samples/sample.exe",
+        idb_path="/samples/sample.i64",
+        pid=42,
+        started_at="2026-10-16T00:00:00Z",
+        **changes,
     )
 
 

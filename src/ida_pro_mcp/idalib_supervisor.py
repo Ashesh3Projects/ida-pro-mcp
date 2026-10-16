@@ -8,13 +8,11 @@ routes IDA-facing calls to per-database ``idalib_server`` worker subprocesses.
 from __future__ import annotations
 
 import argparse
-import copy
 import http.client
 import importlib.util
 import json
 import logging
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -24,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Annotated, Any, TypedDict
+from typing import Any, TypedDict
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +40,7 @@ IDB_MANAGEMENT_TOOLS = {
     "idb_list",
     "idb_close",
 }
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -85,6 +84,7 @@ WORKER_OPEN_TIMEOUT_SEC = _env_float("IDA_MCP_OPEN_TIMEOUT", 1800.0)
 
 def _import_zeromcp():
     from ida_pro_mcp.tool_catalog import fork_schema_generator
+
     return type(fork_schema_generator().__self__)
 
 
@@ -94,7 +94,9 @@ McpServer = _import_zeromcp()
 def _import_discovery():
     """Import pure-Python GUI instance discovery without importing ida_mcp."""
     path = Path(__file__).resolve().parent / "ida_mcp" / "discovery.py"
-    spec = importlib.util.spec_from_file_location("ida_pro_mcp_idalib_supervisor_discovery", path)
+    spec = importlib.util.spec_from_file_location(
+        "ida_pro_mcp_idalib_supervisor_discovery", path
+    )
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not import discovery module from {path}")
     module = importlib.util.module_from_spec(spec)
@@ -202,7 +204,9 @@ class WorkerSession:
     def is_alive(self) -> bool:
         if self.backend == "gui":
             try:
-                return bool(_discovery.probe_instance(self.host, self.port, timeout=0.5))
+                return bool(
+                    _discovery.probe_instance(self.host, self.port, timeout=0.5)
+                )
             except Exception:
                 return False
         return self.process is not None and self.process.poll() is None
@@ -291,7 +295,9 @@ class IdalibSupervisor:
                     f"idalib worker exited early with code {worker.process.returncode}"
                 )
             try:
-                self._worker_rpc(worker, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, timeout=2.0)
+                self._worker_rpc(
+                    worker, {"jsonrpc": "2.0", "id": 1, "method": "ping"}, timeout=2.0
+                )
                 return
             except Exception as e:
                 last_error = e
@@ -315,16 +321,13 @@ class IdalibSupervisor:
     def _partial_database_paths(input_path: str) -> tuple[Path, ...]:
         base = Path(input_path)
         return tuple(
-            base.with_name(base.name + ext)
-            for ext in PARTIAL_DATABASE_EXTENSIONS
+            base.with_name(base.name + ext) for ext in PARTIAL_DATABASE_EXTENSIONS
         )
 
     @classmethod
     def _existing_partial_database_parts(cls, input_path: str) -> set[Path]:
         return {
-            part
-            for part in cls._partial_database_paths(input_path)
-            if part.exists()
+            part for part in cls._partial_database_paths(input_path) if part.exists()
         }
 
     @classmethod
@@ -390,7 +393,9 @@ class IdalibSupervisor:
         stale_session_ids = [
             session.session_id
             for session in self.sessions.values()
-            if session.backend == "worker" and session.owned and self._process_exited(session)
+            if session.backend == "worker"
+            and session.owned
+            and self._process_exited(session)
         ]
         for session_id in stale_session_ids:
             stale = self._unregister_session_locked(session_id)
@@ -476,7 +481,11 @@ class IdalibSupervisor:
         result = response.get("result", {})
         if result.get("isError"):
             content = result.get("content") or []
-            message = content[0].get("text", "Unknown worker tool error") if content else "Unknown worker tool error"
+            message = (
+                content[0].get("text", "Unknown worker tool error")
+                if content
+                else "Unknown worker tool error"
+            )
             raise RuntimeError(message)
         return result.get("structuredContent")
 
@@ -537,7 +546,9 @@ class IdalibSupervisor:
             )
         return matches[0] if matches else None
 
-    def _register_session_locked(self, session: WorkerSession, resolved_path: str) -> None:
+    def _register_session_locked(
+        self, session: WorkerSession, resolved_path: str
+    ) -> None:
         self.sessions[session.session_id] = session
         for candidate in self._candidate_idb_paths(resolved_path):
             self.path_to_session[candidate] = session.session_id
@@ -663,7 +674,8 @@ class IdalibSupervisor:
         if "error" in response:
             result["rpc_ping"] = False
             return busy(
-                "rpc_ping", response["error"].get("message", "JSON-RPC ping returned error")
+                "rpc_ping",
+                response["error"].get("message", "JSON-RPC ping returned error"),
             )
 
         result["rpc_ping"] = True
@@ -717,7 +729,9 @@ class IdalibSupervisor:
         # only known to us, so just terminate the process.
         self._terminate_worker(worker)
 
-    def _make_gui_session(self, resolved_path: str, session_id: str, instance: dict[str, Any]) -> WorkerSession:
+    def _make_gui_session(
+        self, resolved_path: str, session_id: str, instance: dict[str, Any]
+    ) -> WorkerSession:
         idb_path = str(instance.get("idb_path") or resolved_path)
         filename = Path(idb_path).name or Path(resolved_path).name
         return WorkerSession(
@@ -760,10 +774,14 @@ class IdalibSupervisor:
         )
         return worker_stub
 
-    def _launch_gui_and_adopt(self, resolved_path: str, session_id: str) -> WorkerSession:
+    def _launch_gui_and_adopt(
+        self, resolved_path: str, session_id: str
+    ) -> WorkerSession:
         launched = _discovery.launch_gui_instance(resolved_path)
         if not launched.get("success"):
-            raise RuntimeError(launched.get("error") or "Failed to launch GUI IDA process")
+            raise RuntimeError(
+                launched.get("error") or "Failed to launch GUI IDA process"
+            )
         if "host" not in launched or "port" not in launched:
             raise RuntimeError(
                 launched.get("message") or "GUI IDA launched but did not register"
@@ -779,7 +797,9 @@ class IdalibSupervisor:
             existing = self.path_to_session.get(self._path_key(resolved_path))
             if existing is not None:
                 existing_session = self.sessions.get(existing)
-                if existing_session is not None and self._session_is_usable(existing_session):
+                if existing_session is not None and self._session_is_usable(
+                    existing_session
+                ):
                     existing_session.last_accessed = datetime.now()
                     return existing_session
                 self._unregister_session_locked(existing)
@@ -848,9 +868,13 @@ class IdalibSupervisor:
                 # Headless modes never look at GUI instances. Try to attach
                 # to a persistent idalib worker that already has this path
                 # open (orphan from a previous supervisor).
-                worker_instance = self._find_instance_for_path(resolved, backend="worker")
+                worker_instance = self._find_instance_for_path(
+                    resolved, backend="worker"
+                )
                 if worker_instance is not None:
-                    adopted = self._adopt_worker_instance(resolved, session_id, worker_instance)
+                    adopted = self._adopt_worker_instance(
+                        resolved, session_id, worker_instance
+                    )
                     if adopted is not None:
                         return adopted
 
@@ -872,7 +896,6 @@ class IdalibSupervisor:
                     "build_caches": build_caches,
                     "init_hexrays": init_hexrays,
                     "idle_ttl_sec": idle_ttl_sec,
-
                 },
                 timeout=open_timeout,
             )
@@ -917,7 +940,9 @@ class IdalibSupervisor:
             existing = self.path_to_session.get(self._path_key(resolved))
             if existing is not None:
                 existing_session = self.sessions.get(existing)
-                if existing_session is not None and self._session_is_usable(existing_session):
+                if existing_session is not None and self._session_is_usable(
+                    existing_session
+                ):
                     existing_session.last_accessed = datetime.now()
                 else:
                     self._unregister_session_locked(existing)
@@ -931,7 +956,9 @@ class IdalibSupervisor:
                 if existing_by_id is not None:
                     if self._session_is_usable(existing_by_id):
                         existing_by_id.last_accessed = datetime.now()
-                        session_collision_error = ValueError(f"Session already exists: {session_id}")
+                        session_collision_error = ValueError(
+                            f"Session already exists: {session_id}"
+                        )
                     else:
                         self._unregister_session_locked(session_id)
 
@@ -1057,16 +1084,15 @@ class IdalibSupervisor:
             adopted = [
                 self._session_list_entry(session) for session in self.sessions.values()
             ]
-            adopted_path_keys = {
-                key
-                for key in self.path_to_session
-            }
+            adopted_path_keys = {key for key in self.path_to_session}
 
         unadopted: list[IdalibSessionListInfo] = []
         try:
             instances = _discovery.discover_instances()
         except Exception:
-            logger.debug("discover_instances failed during list_sessions", exc_info=True)
+            logger.debug(
+                "discover_instances failed during list_sessions", exc_info=True
+            )
             instances = []
         for inst in instances:
             idb_path = str(inst.get("idb_path") or "")
@@ -1078,7 +1104,9 @@ class IdalibSupervisor:
                 if key in adopted_path_keys:
                     continue
             try:
-                reachable = bool(_discovery.probe_instance(inst["host"], inst["port"], timeout=0.5))
+                reachable = bool(
+                    _discovery.probe_instance(inst["host"], inst["port"], timeout=0.5)
+                )
             except Exception:
                 reachable = False
             backend = _discovered_instance_backend(inst)
@@ -1091,7 +1119,11 @@ class IdalibSupervisor:
                     "created_at": str(inst.get("started_at", "")),
                     "last_accessed": "",
                     "is_analyzing": False,
-                    "metadata": {"backend": backend, "host": inst.get("host"), "port": inst.get("port")},
+                    "metadata": {
+                        "backend": backend,
+                        "host": inst.get("host"),
+                        "port": inst.get("port"),
+                    },
                     "is_active": reachable,
                     "backend": backend,
                     "owned": False,
@@ -1115,20 +1147,36 @@ class IdalibSupervisor:
 
     def worker_tools(self) -> list[dict]:
         from ida_pro_mcp.tool_catalog import get_ida_tools, fork_schema_generator
-        tools = get_ida_tools(fork_schema_generator(), set(getattr(self.mcp._enabled_extensions, "data", set())))
+
+        tools = get_ida_tools(
+            fork_schema_generator(),
+            set(getattr(self.mcp._enabled_extensions, "data", set())),
+        )
         for tool in tools:
             tool["inputSchema"].setdefault("properties", {})["instance_id"] = {
-                "type": "string", "description": "Exact instance ID returned by list_instances"}
+                "type": "string",
+                "description": "Exact instance ID returned by list_instances",
+            }
             tool["inputSchema"].setdefault("required", []).append("instance_id")
         return tools
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MCP supervisor for IDA Pro via idalib")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show debug messages")
-    parser.add_argument("--stdio", action="store_true", help="Serve MCP over stdio instead of HTTP")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="HTTP host, default: 127.0.0.1")
-    parser.add_argument("--port", type=int, default=8745, help="HTTP port, default: 8745")
+    parser = argparse.ArgumentParser(
+        description="MCP supervisor for IDA Pro via idalib"
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Show debug messages"
+    )
+    parser.add_argument(
+        "--stdio", action="store_true", help="Serve MCP over stdio instead of HTTP"
+    )
+    parser.add_argument(
+        "--host", type=str, default="127.0.0.1", help="HTTP host, default: 127.0.0.1"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8745, help="HTTP port, default: 8745"
+    )
     parser.add_argument(
         "--unsafe",
         action=argparse.BooleanOptionalAction,
@@ -1148,7 +1196,9 @@ def main() -> None:
         default=_env_int("IDA_MCP_MAX_WORKERS", 4),
         help="Maximum simultaneous idalib worker databases (0 = unlimited, default: 4).",
     )
-    parser.add_argument("input_path", type=Path, nargs="?", help="Optional binary to open on startup.")
+    parser.add_argument(
+        "input_path", type=Path, nargs="?", help="Optional binary to open on startup."
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
@@ -1164,19 +1214,36 @@ def main() -> None:
     from .instance_router import InstanceRouter
     from .fastmcp_frontend import create_server
     from .unified_server import _profile_names
+
     internal = McpServer("ida-pro-mcp-workers")
-    supervisor = IdalibSupervisor(internal, max_workers=args.max_workers, worker_args=worker_args)
+    supervisor = IdalibSupervisor(
+        internal, max_workers=args.max_workers, worker_args=worker_args
+    )
     provider = SupervisorProvider(supervisor)
-    server = create_server(InstanceRouter(provider), legacy_aliases=True,
-                           profile=_profile_names(args.profile), database=str(args.input_path) if args.input_path else None)
+    from .diagnostics import TraceWriter
+
+    server = create_server(
+        InstanceRouter(provider),
+        legacy_aliases=True,
+        profile=_profile_names(args.profile),
+        database=str(args.input_path) if args.input_path else None,
+        trace=TraceWriter(),
+    )
     try:
         if args.stdio:
             server.run(transport="stdio", show_banner=False)
         else:
-            server.run(transport="http", host=args.host, port=args.port, path="/mcp",
-                       json_response=False, stateless_http=False,
-                       host_origin_protection=True,
-                       allowed_hosts=[args.host, "localhost", "127.0.0.1", "::1"], show_banner=False)
+            server.run(
+                transport="http",
+                host=args.host,
+                port=args.port,
+                path="/mcp",
+                json_response=False,
+                stateless_http=False,
+                host_origin_protection=True,
+                allowed_hosts=[args.host, "localhost", "127.0.0.1", "::1"],
+                show_banner=False,
+            )
     finally:
         supervisor.shutdown()
 

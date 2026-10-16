@@ -43,6 +43,7 @@ def _diagnostic(command: str, arguments: list[str]) -> int:
 
 def _configure_unified(*, extensions: set[str], profile: str | None):
     from ida_pro_mcp.unified_server import UnifiedHost
+
     return UnifiedHost(extensions=extensions, profile=profile), {}
 
 

@@ -40,13 +40,23 @@ def test_capacity_expires_oldest_output():
 def test_router_output_pages_and_close_ownership():
     async def scenario():
         p = FakeProvider([identity("A"), identity("B")])
-        p.result = {"content": [{"type": "text", "text": "preview"}, {"type": "text", "text": "curl http://bad"}],
-                    "structuredContent": {"value": "preview"}, "isError": False,
-                    "_meta": {"ida_mcp": {"output_id": "backend", "download_url": "http://bad"}}}
+        p.result = {
+            "content": [
+                {"type": "text", "text": "preview"},
+                {"type": "text", "text": "curl http://bad"},
+            ],
+            "structuredContent": {"value": "preview"},
+            "isError": False,
+            "_meta": {
+                "ida_mcp": {"output_id": "backend", "download_url": "http://bad"}
+            },
+        }
         p.outputs["backend"] = "0123456789"
         router = InstanceRouter(p)
         a, b = [r["instance_id"] for r in (await router.list_instances())["instances"]]
-        result = await router.request(a, "tools/call", {"name": "py_eval", "arguments": {}})
+        result = await router.request(
+            a, "tools/call", {"name": "py_eval", "arguments": {}}
+        )
         meta = result["_meta"]["ida_mcp"]
         assert meta["instance_id"] == a
         assert "download_url" not in meta
@@ -61,12 +71,14 @@ def test_router_output_pages_and_close_ownership():
         with pytest.raises(RoutingError):
             await router.read_output(a, meta["output_id"])
         await router.shutdown()
+
     asyncio.run(scenario())
 
 
 def test_backend_cache_rejects_previous_database_generation(monkeypatch):
     from _mcp_spec_support import load_ida_rpc_module
     from ida_pro_mcp import instance_runtime
+
     rpc = load_ida_rpc_module()
     state = instance_runtime.RuntimeIdentity()
     monkeypatch.setattr(instance_runtime, "_runtime", state)

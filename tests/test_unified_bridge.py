@@ -194,7 +194,9 @@ def test_failed_mutation_is_not_replayed():
     with backend_server() as backend:
         backend.fail = True
         with pytest.raises(Exception, match="503"):
-            asyncio.run(UnifiedBridge(Manager({"A": backend})).call_tool("patch", {}, "A"))
+            asyncio.run(
+                UnifiedBridge(Manager({"A": backend})).call_tool("patch", {}, "A")
+            )
         assert len(backend.calls) == 1
 
 
@@ -261,7 +263,10 @@ def test_close_waits_for_bridge_call_and_only_releases_owned_context():
         assert backend.released == [
             {
                 "client_id": bridge.client_id,
-                "_meta": {"ida_pro_mcp_client": bridge.client_id, "ida_pro_mcp_generation": "a" * 16},
+                "_meta": {
+                    "ida_pro_mcp_client": bridge.client_id,
+                    "ida_pro_mcp_generation": "a" * 16,
+                },
             }
         ]
         with pytest.raises(ValueError, match="closed"):
@@ -269,8 +274,6 @@ def test_close_waits_for_bridge_call_and_only_releases_owned_context():
 
     with backend_server() as backend:
         asyncio.run(scenario(backend))
-
-
 
 
 def test_bootstrap_rejects_a_different_cached_installation(tmp_path):
@@ -289,7 +292,9 @@ def test_bootstrap_rejects_a_different_cached_installation(tmp_path):
 
 
 @pytest.mark.parametrize("modified", [False, True])
-def test_bootstrap_accepts_identical_copy_and_rejects_changed_package(tmp_path, modified):
+def test_bootstrap_accepts_identical_copy_and_rejects_changed_package(
+    tmp_path, modified
+):
     import json
     from pathlib import Path
     import shutil
@@ -302,9 +307,11 @@ def test_bootstrap_accepts_identical_copy_and_rejects_changed_package(tmp_path, 
     copied = tmp_path / "ida_pro_mcp"
     shutil.copytree(source, copied, ignore=shutil.ignore_patterns("__pycache__"))
     if modified:
-        with (copied / "ida_mcp" / "api_analysis.py").open("a", encoding="utf-8") as stream:
+        with (copied / "ida_mcp" / "api_analysis.py").open(
+            "a", encoding="utf-8"
+        ) as stream:
             stream.write("\n# different installed implementation\n")
-    script = f'''
+    script = f"""
 import json, sys
 sys.path.insert(0, {str(tmp_path)!r})
 from ida_pro_mcp import bridge_runtime
@@ -317,16 +324,16 @@ except RuntimeError as error:
     result = {{"error": str(error)}}
 assert namespace == before
 print(json.dumps(result))
-'''
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=20)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=20
+    )
     assert result.returncode == 0, result.stderr
     actual = json.loads(result.stdout)
     if modified:
         assert "installation" in actual["error"]
     else:
         assert actual == {"copied": True}
-
-
 
 
 def test_cancel_after_transport_loss_waits_for_session_drain_ack():

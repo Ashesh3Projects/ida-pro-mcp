@@ -9,11 +9,19 @@ from ida_pro_mcp.instance_contract import BackendIdentity, RoutingError
 
 
 def identity(key: str, **changes) -> BackendIdentity:
-    return replace(BackendIdentity(
-        provider="fake", key=key, backend="gui", binary_name=f"{key}.exe",
-        binary_path=f"/samples/{key}.exe", idb_path=f"/samples/{key}.i64",
-        pid=42, started_at="2026-10-16T00:00:00Z",
-    ), **changes)
+    return replace(
+        BackendIdentity(
+            provider="fake",
+            key=key,
+            backend="gui",
+            binary_name=f"{key}.exe",
+            binary_path=f"/samples/{key}.exe",
+            idb_path=f"/samples/{key}.i64",
+            pid=42,
+            started_at="2026-10-16T00:00:00Z",
+        ),
+        **changes,
+    )
 
 
 class FakeSession:
@@ -28,20 +36,38 @@ class FakeSession:
     async def request(self, invocation, method, params):
         if self.closed:
             raise RoutingError("INSTANCE_CLOSED", "backend closed")
-        self.provider.calls.append((self.identity.key, method, deepcopy(params), invocation.operation_id))
+        self.provider.calls.append(
+            (self.identity.key, method, deepcopy(params), invocation.operation_id)
+        )
         self.active[invocation.operation_id] = asyncio.current_task()
         try:
             await self.provider.pause(self.identity.key, "request")
             if invocation.cancelled.is_set():
                 raise asyncio.CancelledError()
             if method == "output/read":
-                return {"text": self.provider.outputs.get(params["output_id"], '{"result":"complete"}')}
+                return {
+                    "text": self.provider.outputs.get(
+                        params["output_id"], '{"result":"complete"}'
+                    )
+                }
             if method == "resources/read":
-                return {"contents": [{"uri": params["uri"], "mimeType": "application/json", "text": json.dumps({"backend": self.identity.key})}]}
+                return {
+                    "contents": [
+                        {
+                            "uri": params["uri"],
+                            "mimeType": "application/json",
+                            "text": json.dumps({"backend": self.identity.key}),
+                        }
+                    ]
+                }
             if self.provider.result is not None:
                 return deepcopy(self.provider.result)
             value = {"backend": self.identity.key}
-            return {"content": [{"type": "text", "text": json.dumps(value)}], "structuredContent": value, "isError": False}
+            return {
+                "content": [{"type": "text", "text": json.dumps(value)}],
+                "structuredContent": value,
+                "isError": False,
+            }
         finally:
             self.active.pop(invocation.operation_id, None)
 
@@ -109,7 +135,9 @@ class FakeProvider:
         return session
 
     async def open_path(self, path, options):
-        record = next((r for r in self.records if path in {r.binary_path, r.idb_path}), None)
+        record = next(
+            (r for r in self.records if path in {r.binary_path, r.idb_path}), None
+        )
         if record is None:
             raise FileNotFoundError(path)
         self.opens.append(path)

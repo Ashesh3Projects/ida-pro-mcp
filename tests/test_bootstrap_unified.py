@@ -8,6 +8,22 @@ import pytest
 from scripts import bootstrap_unified as bootstrap
 
 
+def test_receipt_records_frontend_wheel_versions_and_hashes(tmp_path):
+    import json
+
+    frontend = tmp_path / "fastmcp-4.1.0-py3-none-any.whl"
+    sdk = tmp_path / "mcp-2.3.0-py3-none-any.whl"
+    frontend.write_bytes(b"frontend fixture wheel")
+    sdk.write_bytes(b"sdk fixture wheel")
+    receipt = bootstrap.write_receipt(
+        tmp_path, "python", [], repo_root=tmp_path, installed=False
+    )
+    data = json.loads(receipt.read_text())
+    entries = {row["distribution"]: row for row in data["frontend_wheels"]}
+    assert entries["fastmcp"]["version"] == "4.1.0"
+    assert entries["mcp"]["sha256"] == hashlib.sha256(b"sdk fixture wheel").hexdigest()
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-c", "core.longpaths=true", "-C", str(repo), *args],
@@ -166,7 +182,7 @@ def test_write_receipt_records_source_refs_and_wheel_hashes(tmp_path):
 
     assert payload["sources"][0]["ref"] == spec.ref
     assert payload["sources"][0]["wheel"] == wheel.name
-    assert payload["sources"][0]["sha256"] == hashlib.sha256(
-        b"wheel payload"
-    ).hexdigest()
+    assert (
+        payload["sources"][0]["sha256"] == hashlib.sha256(b"wheel payload").hexdigest()
+    )
     assert payload["installed"] is False

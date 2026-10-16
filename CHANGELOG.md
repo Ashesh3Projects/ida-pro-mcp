@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.0.0 - Explicit multi-instance routing
+
+- Require a random `instance_id` on every database tool, resource read and output continuation. Remove selected/current instance state, `select_instance`, caller-chosen IDs and implicit GUI-to-headless replacement.
+- Move public stdio/HTTP frontends to FastMCP 4.1.0 and MCP SDK 2.3.0 with modern sessionless and older protocol support.
+- Isolate queues, cancellation, close/drain and cached outputs by exact instance; reject stale generations before IDA execution.
+- Preserve typed tools, Nexus leases/Python, legacy launch modes, profiles and diagnostic commands.
+- Upgrade the plugin and reconnect clients together. Rediscover IDs after frontend restart. Legacy `idb_close` retains a failed save/drain for retry.
+
+
 ## Unreleased
 
 - Enable unsafe tools, including `py_eval` and `py_exec_file`, by default in the legacy headless worker and supervisor. Add `--no-unsafe` to disable them and forward that choice to newly spawned workers.

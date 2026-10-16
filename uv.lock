@@ -621,7 +621,7 @@ wheels = [
 
 [[package]]
 name = "ida-pro-mcp"
-version = "3.0.1"
+version = "4.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

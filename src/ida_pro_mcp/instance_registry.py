@@ -6,9 +6,22 @@ import secrets
 import threading
 from typing import Callable
 
-from .instance_contract import BackendIdentity, InstanceBinding, RoutingError, require_instance_id
+from .instance_contract import (
+    BackendIdentity,
+    InstanceBinding,
+    RoutingError,
+    require_instance_id,
+)
 
-_STATES = {"available", "attaching", "ready", "closing", "closed", "unavailable", "incompatible"}
+_STATES = {
+    "available",
+    "attaching",
+    "ready",
+    "closing",
+    "closed",
+    "unavailable",
+    "incompatible",
+}
 
 
 class InstanceRegistry:
@@ -21,7 +34,10 @@ class InstanceRegistry:
 
     def publish(self, identity: BackendIdentity) -> InstanceBinding:
         if not identity.compatible or not identity.key:
-            raise RoutingError("INSTANCE_INCOMPATIBLE", "Update the IDA plugin: this instance has no verifiable database generation.")
+            raise RoutingError(
+                "INSTANCE_INCOMPATIBLE",
+                "Update the IDA plugin: this instance has no verifiable database generation.",
+            )
         key = (identity.provider, identity.key)
         with self._lock:
             existing = self._incarnations.get(key)
@@ -42,19 +58,35 @@ class InstanceRegistry:
         with self._lock:
             binding = self._bindings.get(instance_id)
             if binding is None:
-                raise RoutingError("INSTANCE_NOT_FOUND", f"Unknown instance_id {instance_id}; call list_instances on this server.")
+                raise RoutingError(
+                    "INSTANCE_NOT_FOUND",
+                    f"Unknown instance_id {instance_id}; call list_instances on this server.",
+                )
             state = self._states[instance_id]
-            if state in {"closed", "closing"} and not (allow_closing and state == "closing"):
-                raise RoutingError("INSTANCE_CLOSED", f"Instance {instance_id} is {state}; rediscover after close completes.")
+            if state in {"closed", "closing"} and not (
+                allow_closing and state == "closing"
+            ):
+                raise RoutingError(
+                    "INSTANCE_CLOSED",
+                    f"Instance {instance_id} is {state}; rediscover after close completes.",
+                )
             if state == "unavailable":
-                raise RoutingError("INSTANCE_UNAVAILABLE", f"Instance {instance_id} is unavailable; explicitly reopen or rediscover.")
+                raise RoutingError(
+                    "INSTANCE_UNAVAILABLE",
+                    f"Instance {instance_id} is unavailable; explicitly reopen or rediscover.",
+                )
             if state == "incompatible":
-                raise RoutingError("INSTANCE_INCOMPATIBLE", f"Instance {instance_id} requires an updated IDA plugin.")
+                raise RoutingError(
+                    "INSTANCE_INCOMPATIBLE",
+                    f"Instance {instance_id} requires an updated IDA plugin.",
+                )
             return binding
 
     def _owned(self, binding: InstanceBinding) -> None:
         if self._bindings.get(binding.instance_id) is not binding:
-            raise RoutingError("INSTANCE_NOT_FOUND", "Binding does not belong to this server.")
+            raise RoutingError(
+                "INSTANCE_NOT_FOUND", "Binding does not belong to this server."
+            )
 
     def state(self, binding: InstanceBinding) -> str:
         with self._lock:
@@ -68,9 +100,17 @@ class InstanceRegistry:
             self._owned(binding)
             previous = self._states[binding.instance_id]
             if previous in {"closed", "unavailable"} and state != previous:
-                raise RoutingError("INSTANCE_CLOSED", "A retired binding cannot be revived.")
-            if previous == "closing" and state not in {"closing", "closed", "unavailable"}:
-                raise RoutingError("INSTANCE_CLOSED", "A closing binding cannot accept work.")
+                raise RoutingError(
+                    "INSTANCE_CLOSED", "A retired binding cannot be revived."
+                )
+            if previous == "closing" and state not in {
+                "closing",
+                "closed",
+                "unavailable",
+            }:
+                raise RoutingError(
+                    "INSTANCE_CLOSED", "A closing binding cannot accept work."
+                )
             self._states[binding.instance_id] = state
 
     def retire(self, binding: InstanceBinding, *, state: str = "closed") -> None:

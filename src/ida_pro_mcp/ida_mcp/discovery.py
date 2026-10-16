@@ -44,6 +44,9 @@ class InstanceInfo(TypedDict, total=False):
 
 
 def _get_ida_user_dir() -> str:
+    configured = os.environ.get("IDAUSR", "").split(os.pathsep)[0].strip()
+    if configured:
+        return os.path.expanduser(configured)
     if sys.platform == "win32":
         return os.path.join(os.environ["APPDATA"], "Hex-Rays", "IDA Pro")
     return os.path.join(os.path.expanduser("~"), ".idapro")
@@ -60,7 +63,9 @@ def get_legacy_instances_dir() -> str:
 
 def get_instance_dirs() -> list[str]:
     """Return current and legacy registry directories in preference order."""
-    directories = [get_instances_dir(), get_legacy_instances_dir()]
+    directories = [get_instances_dir()]
+    if not os.environ.get("IDAUSR", "").strip():
+        directories.append(get_legacy_instances_dir())
     result = []
     seen = set()
     for path in directories:
@@ -313,14 +318,19 @@ def launch_gui_instance(
     try:
         subprocess.Popen(
             args,
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-            if sys.platform == "win32" else 0,
+            creationflags=subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            if sys.platform == "win32"
+            else 0,
         )
     except Exception as e:
         return {"success": False, "error": f"Failed to launch IDA: {e}"}
 
     if timeout == 0:
-        return {"success": True, "message": "IDA launched, not waiting for registration"}
+        return {
+            "success": True,
+            "message": "IDA launched, not waiting for registration",
+        }
 
     deadline = time.monotonic() + timeout
     new_instance = None

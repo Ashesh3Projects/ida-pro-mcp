@@ -106,9 +106,7 @@ def _truncate_value(value: Any, depth: int = 0) -> Any:
     )
     preview: Any = value
     for string_limit, item_limit in limits:
-        preview = _truncate_value_with_limits(
-            value, depth, string_limit, item_limit
-        )
+        preview = _truncate_value_with_limits(value, depth, string_limit, item_limit)
         if len(json.dumps(preview)) <= OUTPUT_LIMIT_PREVIEW_MAX_CHARS:
             break
     return preview
@@ -117,6 +115,7 @@ def _truncate_value(value: Any, depth: int = 0) -> Any:
 def _build_download_meta(output_id: str, total_chars: int) -> dict:
     download_url = f"{get_download_base_url()}/output/{output_id}.json"
     from ida_pro_mcp.instance_runtime import expected_generation
+
     generation = expected_generation()
     if generation:
         download_url += f"?instance_id={generation}"
@@ -131,6 +130,7 @@ def _build_download_meta(output_id: str, total_chars: int) -> dict:
 
 def get_cached_output(output_id: str) -> Optional[Any]:
     from ida_pro_mcp.instance_runtime import expected_generation
+
     if _output_generations.get(output_id) != expected_generation():
         return None
     return _output_cache.get(output_id)
@@ -143,6 +143,7 @@ def _cache_output(output_id: str, data: Any) -> None:
         _output_generations.pop(oldest_key, None)
     _output_cache[output_id] = data
     from ida_pro_mcp.instance_runtime import expected_generation
+
     _output_generations[output_id] = expected_generation()
 
 
@@ -164,13 +165,16 @@ def _limit_output_response(response: dict) -> dict:
     preview = _truncate_value(structured)
     download_meta = _build_download_meta(output_id, len(serialized))
 
-    content = [{
-        "type": "text",
-        "text": json.dumps(preview, separators=(",", ":")),
-    }, {
-        "type": "text",
-        "text": download_meta["download_hint"],
-    }]
+    content = [
+        {
+            "type": "text",
+            "text": json.dumps(preview, separators=(",", ":")),
+        },
+        {
+            "type": "text",
+            "text": download_meta["download_hint"],
+        },
+    ]
 
     return {
         "structuredContent": preview,

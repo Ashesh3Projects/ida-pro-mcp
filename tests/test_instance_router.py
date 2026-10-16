@@ -21,7 +21,10 @@ def test_many_queued_calls_do_not_block_another_instance():
     async def scenario():
         p, router, a, b = await setup()
         p.block_request("A")
-        tasks = [asyncio.create_task(router.request(a, "tools/call", PARAMS)) for _ in range(65)]
+        tasks = [
+            asyncio.create_task(router.request(a, "tools/call", PARAMS))
+            for _ in range(65)
+        ]
         await p.wait_entered("A", "request")
         peer = await asyncio.wait_for(router.request(b, "tools/call", PARAMS), 2)
         assert peer["structuredContent"]["backend"] == "B"
@@ -31,6 +34,7 @@ def test_many_queued_calls_do_not_block_another_instance():
         assert len(p.sessions) == 2
         assert len({row[3] for row in p.calls}) == 66
         await router.shutdown()
+
     asyncio.run(scenario())
 
 
@@ -52,6 +56,7 @@ def test_cancel_and_close_affect_only_named_instance():
         p.release("B", "attach")
         assert (await peer)["structuredContent"]["backend"] == "B"
         await router.shutdown()
+
     asyncio.run(scenario())
 
 
@@ -66,11 +71,14 @@ def test_failed_close_is_retriable_and_cannot_be_bypassed():
         assert next(r for r in rows if r["binary_name"] == "A.exe")["instance_id"] == a
         with pytest.raises(RoutingError):
             await router.request(a, "tools/call", PARAMS)
-        assert (await router.request(b, "tools/call", PARAMS))["structuredContent"]["backend"] == "B"
+        assert (await router.request(b, "tools/call", PARAMS))["structuredContent"][
+            "backend"
+        ] == "B"
         p.fail_close.clear()
         await router.close_database(a)
         assert p.sessions[0].close_count == 1
         await router.shutdown()
+
     asyncio.run(scenario())
 
 
@@ -90,6 +98,7 @@ def test_close_waits_for_attachment_and_releases_acquired_handle():
         assert p.calls == []
         assert p.sessions[0].closed
         await router.shutdown()
+
     asyncio.run(scenario())
 
 
@@ -111,6 +120,7 @@ def test_cancel_open_waiter_does_not_abandon_shared_lease():
         assert not p.sessions[0].closed
         await router.shutdown()
         assert p.sessions[0].closed
+
     asyncio.run(scenario())
 
 
@@ -128,6 +138,7 @@ def test_shutdown_drains_healthy_peers_after_one_failure():
         p.fail_close.clear()
         await router.shutdown()
         assert p.sessions[0].closed
+
     asyncio.run(scenario())
 
 
@@ -140,6 +151,7 @@ def test_replacement_does_not_receive_stale_request():
             await router.request(a, "tools/call", PARAMS)
         assert p.calls == []
         await router.shutdown()
+
     asyncio.run(scenario())
 
 
@@ -148,11 +160,14 @@ def test_repeated_open_of_provider_owned_session_does_not_close_it():
         p, router, a, _ = await setup()
         await router.request(a, "tools/call", PARAMS)
         existing = p.sessions[0]
+
         async def reuse(path, options):
             return existing
+
         p.open_path = reuse
         opened = await router.open_database("/samples/A.exe")
         assert opened["instance_id"] == a
         assert not existing.closed
         await router.shutdown()
+
     asyncio.run(scenario())

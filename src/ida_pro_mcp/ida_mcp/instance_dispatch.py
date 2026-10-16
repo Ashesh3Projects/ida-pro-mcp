@@ -5,8 +5,16 @@ import json
 import secrets
 import threading
 import time
-from ida_pro_mcp.instance_contract import RoutingError, require_instance_id, split_instance_uri
-from ida_pro_mcp.instance_runtime import expected_generation, generation_context, runtime_identity
+from ida_pro_mcp.instance_contract import (
+    RoutingError,
+    require_instance_id,
+    split_instance_uri,
+)
+from ida_pro_mcp.instance_runtime import (
+    expected_generation,
+    generation_context,
+    runtime_identity,
+)
 
 from .execution_context import bridge_context
 
@@ -37,7 +45,8 @@ def install_instance_dispatch(server) -> None:
                 continue
             schema = tool["inputSchema"]
             schema.setdefault("properties", {})["instance_id"] = {
-                "type": "string", "pattern": "^[0-9a-f]{16}$",
+                "type": "string",
+                "pattern": "^[0-9a-f]{16}$",
                 "description": "Required instance ID returned by this endpoint's list_instances.",
             }
             required = schema.setdefault("required", [])
@@ -48,7 +57,13 @@ def install_instance_dispatch(server) -> None:
     def templates_list():
         templates = deepcopy(original_templates())["resourceTemplates"]
         for resource in original_resources()["resources"]:
-            templates.append({"uriTemplate": resource["uri"], "name": resource["name"], "description": resource.get("description", "")})
+            templates.append(
+                {
+                    "uriTemplate": resource["uri"],
+                    "name": resource["name"],
+                    "description": resource.get("description", ""),
+                }
+            )
         for resource in templates:
             resource["uriTemplate"] += "{?instance_id}"
         return {"resourceTemplates": templates}
@@ -59,7 +74,11 @@ def install_instance_dispatch(server) -> None:
 
     def dispatch(raw):
         try:
-            request = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else deepcopy(raw)
+            request = (
+                json.loads(raw)
+                if isinstance(raw, (str, bytes, bytearray))
+                else deepcopy(raw)
+            )
         except (TypeError, ValueError):
             return original(raw)
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
@@ -113,17 +132,26 @@ def install_instance_dispatch(server) -> None:
             request["params"] = params
             key = (session, type(original_id), original_id)
             if type(original_id) not in (str, int):
-                raise RoutingError("INVALID_REQUEST", "Database calls require an integer or string request ID.")
+                raise RoutingError(
+                    "INVALID_REQUEST",
+                    "Database calls require an integer or string request ID.",
+                )
             event = threading.Event()
             with lock:
                 if key in pending:
-                    raise RoutingError("INVALID_REQUEST", "Request ID is already in flight for this client.")
+                    raise RoutingError(
+                        "INVALID_REQUEST",
+                        "Request ID is already in flight for this client.",
+                    )
                 if early.pop(key, 0) > time.monotonic():
                     event.set()
                 pending[key] = event
             request["id"] = secrets.token_hex(16)
             try:
-                with generation_context(generation), bridge_context(f"direct:{session}:{generation}", event):
+                with (
+                    generation_context(generation),
+                    bridge_context(f"direct:{session}:{generation}", event),
+                ):
                     response = original(request)
                 if response is not None:
                     response["id"] = original_id
@@ -138,7 +166,19 @@ def install_instance_dispatch(server) -> None:
             if original_id is None:
                 return None
             if method == "tools/call":
-                return {"jsonrpc": "2.0", "id": original_id, "result": error.tool_result()}
-            return {"jsonrpc": "2.0", "id": original_id, "error": {"code": -32602, "message": str(error), "data": {"error_code": error.code}}}
+                return {
+                    "jsonrpc": "2.0",
+                    "id": original_id,
+                    "result": error.tool_result(),
+                }
+            return {
+                "jsonrpc": "2.0",
+                "id": original_id,
+                "error": {
+                    "code": -32602,
+                    "message": str(error),
+                    "data": {"error_code": error.code},
+                },
+            }
 
     server.registry.dispatch = dispatch

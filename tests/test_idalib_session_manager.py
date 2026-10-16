@@ -60,7 +60,9 @@ def session_env(monkeypatch):
     monkeypatch.setitem(sys.modules, "ida_pro_mcp.ida_mcp", fake_ida_mcp)
     monkeypatch.setitem(sys.modules, "ida_pro_mcp.ida_mcp.api_core", fake_api_core)
     # Re-import against the stubs, not any real copy left by another test.
-    monkeypatch.delitem(sys.modules, "ida_pro_mcp.idalib_session_manager", raising=False)
+    monkeypatch.delitem(
+        sys.modules, "ida_pro_mcp.idalib_session_manager", raising=False
+    )
 
     module = importlib.import_module("ida_pro_mcp.idalib_session_manager")
     manager = module.IDASessionManager()
@@ -91,7 +93,7 @@ def test_switching_binaries_invalidates_strings_cache(session_env, tmp_path):
     assert session_env.idapro.events == [("close",), ("open", str(b))]
 
 
-def test_activate_session_invalidates_strings_cache(session_env, tmp_path):
+def test_closed_session_cannot_reactivate_an_old_database(session_env, tmp_path):
     a = _make_binary(tmp_path, "a.bin")
     b = _make_binary(tmp_path, "b.bin")
 
@@ -99,9 +101,9 @@ def test_activate_session_invalidates_strings_cache(session_env, tmp_path):
     session_env.manager.open_binary(b, run_auto_analysis=False)  # b is now active
     session_env.spy.invalidations = 0
 
-    session_env.manager.activate_session(sid_a)
-
-    assert session_env.spy.invalidations >= 1, "cache not invalidated on re-activation"
+    with pytest.raises(ValueError, match="Session not found"):
+        session_env.manager.activate_session(sid_a)
+    assert session_env.spy.invalidations == 0
 
 
 def test_reactivating_already_active_session_does_not_invalidate(session_env, tmp_path):
@@ -121,7 +123,9 @@ def test_closing_active_session_invalidates_strings_cache(session_env, tmp_path)
 
     session_env.manager.close_session(sid_a)
 
-    assert session_env.spy.invalidations >= 1, "cache not invalidated when active DB closed"
+    assert session_env.spy.invalidations >= 1, (
+        "cache not invalidated when active DB closed"
+    )
 
 
 def test_closing_inactive_session_preserves_active_cache(session_env, tmp_path):
@@ -133,7 +137,9 @@ def test_closing_inactive_session_preserves_active_cache(session_env, tmp_path):
 
     session_env.manager.close_session(sid_a)  # a is not active; b stays loaded
 
-    assert session_env.spy.invalidations == 0, "must not clear cache for the still-active DB"
+    assert session_env.spy.invalidations == 0, (
+        "must not clear cache for the still-active DB"
+    )
 
 
 def test_close_all_sessions_invalidates_strings_cache(session_env, tmp_path):

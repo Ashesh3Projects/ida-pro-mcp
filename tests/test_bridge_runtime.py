@@ -5,7 +5,6 @@ import http.client
 import importlib
 import json
 import threading
-import time
 
 import pytest
 
@@ -42,8 +41,13 @@ def request(runtime, method="POST", path="/mcp", *, body=None, headers=None, aut
     )
     actual_headers = {"Content-Type": "application/json"}
     actual_headers["X-IDA-MCP-Generation"] = descriptor["generation"]
-    if isinstance(body, dict) and body.get("method") in {"tools/call", "resources/read"}:
-        body.setdefault("params", {}).setdefault("_meta", {}).setdefault("ida_pro_mcp_generation", descriptor["generation"])
+    if isinstance(body, dict) and body.get("method") in {
+        "tools/call",
+        "resources/read",
+    }:
+        body.setdefault("params", {}).setdefault("_meta", {}).setdefault(
+            "ida_pro_mcp_generation", descriptor["generation"]
+        )
     if auth:
         actual_headers["Authorization"] = "Bearer " + descriptor["token"]
     actual_headers.update(headers or {})
@@ -107,10 +111,12 @@ def test_every_route_requires_token(runtime, method, path):
 
 def test_wrong_generation_never_reaches_backend(runtime):
     calls = []
+
     @runtime[1].tool
     def identify() -> dict:
         calls.append(True)
         return {}
+
     body = call()
     body["params"]["_meta"]["ida_pro_mcp_generation"] = "0" * 16
     _, data = request(runtime, body=body)
@@ -160,6 +166,7 @@ def test_malformed_optional_context_is_a_jsonrpc_error(runtime):
 
 def test_output_requires_token_and_configuration_is_not_exposed(runtime):
     from ida_pro_mcp.instance_runtime import generation_context
+
     with generation_context(runtime[3]["generation"]):
         runtime[1]._cache_output("a123", {"complete": "value"})
     status, body = request(runtime, "GET", "/output/a123.json")

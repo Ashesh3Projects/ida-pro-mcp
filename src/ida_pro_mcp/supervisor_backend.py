@@ -1,7 +1,6 @@
 """Expose existing supervisor workers through exact public instance bindings."""
 
 import asyncio
-from dataclasses import replace
 import secrets
 
 from .instance_contract import RoutingError
@@ -12,8 +11,11 @@ class SupervisorProvider(ProxyProvider):
     name = "supervisor"
 
     def __init__(self, supervisor, *, extensions=None):
-        super().__init__(discover=supervisor.discovery_instances, extensions=extensions,
-                         timeout=supervisor.call_timeout)
+        super().__init__(
+            discover=supervisor.discovery_instances,
+            extensions=extensions,
+            timeout=supervisor.call_timeout,
+        )
         self.supervisor = supervisor
         self._owned = {}
 
@@ -37,14 +39,29 @@ class SupervisorProvider(ProxyProvider):
         # Identity comes from the listener, never from the supervisor's private
         # session name or an inferred PID/port combination.
         probe = ProxySession({"host": worker.host, "port": worker.port}, self, None)
-        reply = await asyncio.to_thread(probe.rpc, "tools/call", {"name": "list_instances", "arguments": {}}, secrets.token_hex(16))
+        reply = await asyncio.to_thread(
+            probe.rpc,
+            "tools/call",
+            {"name": "list_instances", "arguments": {}},
+            secrets.token_hex(16),
+        )
         rows = reply.get("structuredContent", {}).get("instances", [])
         if len(rows) != 1:
-            raise RoutingError("INSTANCE_INCOMPATIBLE", "Worker must expose one database generation; update its plugin.")
-        record = {**rows[0], "host": worker.host, "port": worker.port, "backend": worker.backend}
+            raise RoutingError(
+                "INSTANCE_INCOMPATIBLE",
+                "Worker must expose one database generation; update its plugin.",
+            )
+        record = {
+            **rows[0],
+            "host": worker.host,
+            "port": worker.port,
+            "backend": worker.backend,
+        }
         identity = self._identity(record)
         if not identity.compatible:
-            raise RoutingError("INSTANCE_INCOMPATIBLE", "Worker lacks an exact database identity")
+            raise RoutingError(
+                "INSTANCE_INCOMPATIBLE", "Worker lacks an exact database identity"
+            )
         existing = self._owned.get(identity.key)
         if existing is not None and not existing._closed:
             return existing
